@@ -315,6 +315,7 @@ impl Inner {
         if let Some(schema) = args.get("schema") {
             config.insert("schema".into(), schema.clone());
         }
+        copy_oauth_config(args, &mut config);
         self.register_kind(args, PluginId::graphql(), Value::Object(config))
     }
 
@@ -517,6 +518,7 @@ fn add_spec_schema() -> Value {
             "name":{"type":"string"},
             "description":{"type":"string"},
             "baseUrl":{"type":"string"},
+            "tag":{"type":"string"},
             "spec":{}
         }
     })
@@ -552,6 +554,10 @@ fn openapi_config(args: &Value) -> Result<Value, executor_core::ExecutorError> {
     if let Some(base) = args.get("baseUrl").and_then(Value::as_str) {
         config.insert("baseUrl".into(), Value::String(base.to_owned()));
     }
+    if let Some(tag) = args.get("tag").and_then(Value::as_str) {
+        config.insert("tag".into(), Value::String(tag.to_owned()));
+    }
+    copy_oauth_config(args, &mut config);
     Ok(Value::Object(config))
 }
 
@@ -623,5 +629,16 @@ fn parse_action(raw: &str) -> Result<PolicyAction, executor_core::ExecutorError>
         other => Err(executor_core::ExecutorError::InvalidArgs(format!(
             "unknown action {other}"
         ))),
+    }
+}
+
+fn copy_oauth_config(args: &Value, config: &mut serde_json::Map<String, Value>) {
+    for key in ["authorizationUrl", "tokenUrl"] {
+        if let Some(url) = args.get(key).and_then(Value::as_str) {
+            config.insert(key.to_owned(), Value::String(url.to_owned()));
+        }
+    }
+    if let Some(scopes) = args.get("scopes") {
+        config.insert("scopes".into(), scopes.clone());
     }
 }

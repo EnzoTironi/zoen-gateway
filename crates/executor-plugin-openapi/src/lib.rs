@@ -18,7 +18,9 @@ use reqwest::Client;
 use serde_json::Value;
 use tracing::instrument;
 
-pub use extract::{extract_operations, parse_spec, spec_base_url, tools_from_operations};
+pub use extract::{
+    extract_operations, operations_by_tag, parse_spec, spec_base_url, tools_from_operations,
+};
 
 /// First-party `OpenAPI` plugin. Shared HTTP client (connection pool).
 pub struct OpenApiPlugin {
@@ -87,11 +89,18 @@ impl IntegrationPlugin for OpenApiPlugin {
     #[instrument(skip(self, ctx))]
     async fn resolve_tools(&self, ctx: ResolveToolsCtx<'_>) -> Result<ResolvedTools, PluginError> {
         let text = load_spec(&self.client, ctx.config, ctx.timeout).await?;
-        if text.len() > ctx.max_tools.saturating_mul(64 * 1024).max(16) {
-            // byte cap is enforced by engine; keep parse bounded by size of text
+        if text.len() > ctx.max_spec_bytes {
+            return Err(PluginError::new(format!(
+                "spec is {} bytes (max {})",
+                text.len(),
+                ctx.max_spec_bytes
+            )));
         }
         let doc = parse_spec(&text)?;
-        let ops = extract_operations(&doc)?;
+        let mut ops = extract_operations(&doc)?;
+        if let Some(tag) = ctx.config.get("tag").and_then(Value::as_str) {
+            ops.retain(|op| op.tag.as_deref() == Some(tag));
+        }
         if ops.len() > ctx.max_tools {
             return Err(PluginError::new(format!(
                 "spec produced {} operations (max {})",
@@ -188,7 +197,27 @@ fn describe_from_config(config: &IntegrationConfig) -> Vec<AuthMethod> {
             return parsed;
         }
     }
-    vec![AuthMethod::none(), AuthMethod::bearer()]
+    let mut methods = vec![AuthMethod::none(), AuthMethod::bearer()];
+    if let Some(oauth) = oauth_from_config(config) {
+        methods.push(oauth);
+    }
+    methods
+}
+
+fn oauth_from_config(config: &IntegrationConfig) -> Option<AuthMethod> {
+    let auth = config.get("authorizationUrl").and_then(Value::as_str)?;
+    let token = config.get("tokenUrl").and_then(Value::as_str)?;
+    let scopes = config
+        .get("scopes")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(AuthMethod::oauth(auth, token, scopes))
 }
 
 async fn load_spec(

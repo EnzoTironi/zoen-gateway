@@ -134,6 +134,9 @@ pub enum ExecutorError {
     /// Catalog or spec exceeded a configured bound.
     #[error("limit exceeded: {0}")]
     LimitExceeded(String),
+    /// Code-mode parse or runtime failure.
+    #[error("code-mode: {0}")]
+    Code(String),
 }
 
 impl ExecutorError {

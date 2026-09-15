@@ -51,7 +51,7 @@ pub use limits::Limits;
 pub use metrics::{AtomicMetrics, Metrics, MetricsSnapshot, NoopMetrics, names as metric_names};
 pub use owner::Owner;
 pub use path::{
-    Invocation, ToolPathChild, ToolPathError, ToolPathInspection, build_tool_path,
+    Invocation, ToolPathChild, ToolPathError, ToolPathInspection, build_tool_path, compile_call,
     inspect_tool_path, resolve_invocation,
 };
 pub use plugin::{

@@ -361,3 +361,28 @@ async fn approval_pause_and_resume() {
 fn policy_action_is_closed() {
     assert_eq!(PolicyAction::Block.restriction_rank(), 3);
 }
+
+#[tokio::test]
+async fn code_mode_compiles_and_calls() {
+    let exec = wired(Arc::new(EchoPlugin), Limits::production(), "echo").await;
+    let src = executor_core::compile_call("tools.echo.org.work.ping", &json!({"n": 9}));
+    let out = exec
+        .run_code(
+            &src,
+            ExecuteOptions {
+                auto_approve: true,
+                ..ExecuteOptions::default()
+            },
+        )
+        .await
+        .expect("code");
+    match out {
+        Outcome::Completed {
+            result: ToolResult::Ok { data, .. },
+            ..
+        } => {
+            assert_eq!(data["n"], 9);
+        }
+        other => panic!("{other:?}"),
+    }
+}

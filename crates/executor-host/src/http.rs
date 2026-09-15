@@ -34,6 +34,7 @@ pub fn app(state: AppState, limits: &Limits) -> Router {
         .route("/api/resume", post(api_resume))
         .route("/api/tools", get(api_tools))
         .route("/api/integrations", get(api_integrations))
+        .merge(crate::auth::routes())
         .layer(DefaultBodyLimit::max(body))
         .layer(
             ServiceBuilder::new()
@@ -202,7 +203,8 @@ fn map_outcome(result: Result<Outcome, ExecutorError>) -> axum::response::Respon
                 ExecutorError::ToolNotFound { .. } => StatusCode::NOT_FOUND,
                 ExecutorError::InvalidArgs(_)
                 | ExecutorError::InvalidPattern(_)
-                | ExecutorError::InvalidId(_) => StatusCode::BAD_REQUEST,
+                | ExecutorError::InvalidId(_)
+                | ExecutorError::Code(_) => StatusCode::BAD_REQUEST,
                 _ => StatusCode::BAD_GATEWAY,
             };
             err_status(status, err.to_string())

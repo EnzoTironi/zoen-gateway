@@ -77,7 +77,24 @@ impl IntegrationPlugin for GraphqlPlugin {
                 return parsed;
             }
         }
-        vec![AuthMethod::none(), AuthMethod::bearer()]
+        let mut methods = vec![AuthMethod::none(), AuthMethod::bearer()];
+        if let (Some(auth), Some(token)) = (
+            config.get("authorizationUrl").and_then(Value::as_str),
+            config.get("tokenUrl").and_then(Value::as_str),
+        ) {
+            let scopes = config
+                .get("scopes")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            methods.push(AuthMethod::oauth(auth, token, scopes));
+        }
+        methods
     }
 
     #[instrument(skip(self, ctx))]
@@ -88,6 +105,7 @@ impl IntegrationPlugin for GraphqlPlugin {
             introspect(&self.client, ctx.config, ctx.values, ctx.timeout).await?
         };
         let inner = schema.get("__schema").cloned().unwrap_or(schema);
+        ensure_spec_budget(&inner, ctx.max_spec_bytes)?;
         let tools = tools_from_introspection(&inner)?;
         if tools.len() > ctx.max_tools {
             return Err(PluginError::new(format!(
@@ -170,6 +188,16 @@ impl IntegrationPlugin for GraphqlPlugin {
     }
 }
 
+fn ensure_spec_budget(schema: &Value, max: usize) -> Result<(), PluginError> {
+    let bytes = serde_json::to_vec(schema).unwrap_or_default().len();
+    if bytes > max {
+        return Err(PluginError::new(format!(
+            "schema is {bytes} bytes (max {max})"
+        )));
+    }
+    Ok(())
+}
+
 trait EndpointExt {
     fn config_endpoint(&self) -> Option<String>;
 }
@@ -245,12 +273,24 @@ async fn introspect(
 #[cfg(test)]
 mod tests {
     use super::GraphqlPlugin;
-    use executor_core::IntegrationPlugin;
+    use executor_core::{AuthKind, IntegrationPlugin};
+    use serde_json::json;
 
     #[test]
     fn detects_graphql() {
         let p = GraphqlPlugin::new();
         assert!(p.detect("https://api.example.test/graphql").is_some());
         assert!(p.detect("https://example.test/v1").is_none());
+    }
+
+    #[test]
+    fn describe_auth_includes_oauth() {
+        let p = GraphqlPlugin::new();
+        let methods = p.describe_auth(&json!({
+            "authorizationUrl": "https://auth.example/authorize",
+            "tokenUrl": "https://auth.example/token",
+            "scopes": ["read"]
+        }));
+        assert!(methods.iter().any(|m| m.kind == AuthKind::Oauth));
     }
 }

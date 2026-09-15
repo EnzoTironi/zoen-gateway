@@ -46,6 +46,12 @@ impl AuthTemplateSlug {
         Self("apiKey".to_owned())
     }
 
+    /// OAuth template slug.
+    #[must_use]
+    pub fn oauth() -> Self {
+        Self("oauth".to_owned())
+    }
+
     /// Borrow the slug.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -190,6 +196,25 @@ impl AuthMethod {
             authorization_url: None,
             token_url: None,
             scopes: Vec::new(),
+        }
+    }
+
+    /// OAuth authorization-code / client-credentials template.
+    #[must_use]
+    pub fn oauth(
+        authorization_url: impl Into<String>,
+        token_url: impl Into<String>,
+        scopes: Vec<String>,
+    ) -> Self {
+        Self {
+            id: "oauth".to_owned(),
+            label: "OAuth".to_owned(),
+            kind: AuthKind::Oauth,
+            template: AuthTemplateSlug::oauth(),
+            placements: vec![AuthPlacement::bearer_header()],
+            authorization_url: Some(authorization_url.into()),
+            token_url: Some(token_url.into()),
+            scopes,
         }
     }
 }

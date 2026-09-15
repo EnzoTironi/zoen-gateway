@@ -15,7 +15,9 @@ async-trait = "0.1.83"
 axum = { version = "0.8.1", features = ["json"] }
 base64 = "0.22.1"
 bytes = "1.9.0"
+chacha20poly1305 = "0.10.1"
 clap = { version = "4.5.23", features = ["derive", "env"] }
+getrandom = "0.2.15"
 hex = "0.4.3"
 http-body-util = "0.1.2"
 parking_lot = "0.12.3"
@@ -48,6 +50,7 @@ wiremock = "0.6.2"
 tokio-util = { version = "0.7.13", features = ["rt"] }
 tower = { version = "0.5.2", features = ["limit", "timeout", "util"] }
 
+executor-codemode = { path = "crates/executor-codemode" }
 executor-core = { path = "crates/executor-core" }
 executor-engine = { path = "crates/executor-engine" }
 executor-host = { path = "crates/executor-host" }

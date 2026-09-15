@@ -72,7 +72,14 @@ impl IntegrationPlugin for McpPlugin {
 
     #[instrument(skip(self, ctx))]
     async fn resolve_tools(&self, ctx: ResolveToolsCtx<'_>) -> Result<ResolvedTools, PluginError> {
-        let listed = list_tools(&self.client, ctx.config, ctx.values, ctx.timeout).await?;
+        let listed = list_tools(
+            &self.client,
+            ctx.config,
+            ctx.values,
+            ctx.timeout,
+            ctx.max_spec_bytes,
+        )
+        .await?;
         if listed.len() > ctx.max_tools {
             return Err(PluginError::new(format!(
                 "MCP server listed {} tools (max {})",
@@ -114,6 +121,7 @@ async fn list_tools(
     config: &IntegrationConfig,
     values: &executor_core::CredentialMapValues,
     timeout: Duration,
+    max_spec_bytes: usize,
 ) -> Result<Vec<ToolDef>, PluginError> {
     let result = rpc(
         client,
@@ -126,6 +134,12 @@ async fn list_tools(
         timeout,
     )
     .await?;
+    let encoded = serde_json::to_vec(&result).unwrap_or_default().len();
+    if encoded > max_spec_bytes {
+        return Err(PluginError::new(format!(
+            "tools/list is {encoded} bytes (max {max_spec_bytes})"
+        )));
+    }
     let tools = result
         .get("tools")
         .and_then(Value::as_array)

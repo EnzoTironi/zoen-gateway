@@ -29,6 +29,8 @@ fn help_and_empty_integrations() {
     let (code, stdout, stderr) = run(dir.path(), &["--help"]);
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("call"), "{stdout}");
+    assert!(stdout.contains("login"), "{stdout}");
+    assert!(stdout.contains("server"), "{stdout}");
     assert!(!stdout.to_ascii_lowercase().contains("web ui"));
     let (code, stdout, stderr) = run(dir.path(), &["tools", "integrations"]);
     assert_eq!(code, 0, "{stderr}");
@@ -86,4 +88,30 @@ fn call_github_via_cli() {
     let parsed: Value = serde_json::from_str(&stdout).unwrap_or_else(|_| json!({}));
     let login = parsed.pointer("/result/data/login");
     assert_eq!(login, Some(&json!("octocat")), "{stdout}");
+}
+
+#[test]
+fn server_profiles_and_whoami() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let (code, stdout, stderr) = run(
+        dir.path(),
+        &[
+            "server",
+            "add",
+            "cloud",
+            "--origin",
+            "https://example.test",
+            "--default",
+        ],
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let (code, stdout, stderr) = run(dir.path(), &["server", "list"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("cloud"), "{stdout}");
+    let (code, stdout, stderr) = run(dir.path(), &["whoami"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("cloud"), "{stdout}");
+    assert!(stdout.contains("example.test"), "{stdout}");
+    let (code, _, stderr) = run(dir.path(), &["login", "--help"]);
+    assert_eq!(code, 0, "{stderr}");
 }

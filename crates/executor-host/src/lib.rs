@@ -3,6 +3,7 @@
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::result_large_err)]
 
+mod auth;
 mod http;
 mod mcp;
 
@@ -14,6 +15,7 @@ use executor_engine::Executor;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+pub use auth::HostAuth;
 pub use http::app;
 pub use mcp::{handle_jsonrpc, stdio_loop};
 
@@ -42,6 +44,20 @@ pub struct AppState {
     pub executor: Executor,
     /// Optional scrapeable atomics.
     pub metrics: Option<Arc<AtomicMetrics>>,
+    /// Device-login / OAuth tables.
+    pub auth: Arc<HostAuth>,
+}
+
+impl AppState {
+    /// Construct with an empty auth table.
+    #[must_use]
+    pub fn new(executor: Executor, metrics: Option<Arc<AtomicMetrics>>) -> Self {
+        Self {
+            executor,
+            metrics,
+            auth: Arc::new(HostAuth::new()),
+        }
+    }
 }
 
 /// Serve until `cancel` fires or the listener fails.

@@ -8,8 +8,10 @@
 #![allow(clippy::module_name_repetitions)] // `Executor` vocabulary (`ExecuteOptions` lives in core).
 
 mod catalog;
+mod code;
 mod execute;
 mod lookup;
+mod oauth;
 mod static_tools;
 
 use std::collections::{BTreeMap, HashMap};
@@ -25,6 +27,10 @@ use executor_secrets::{MemorySecrets, SecretResolver};
 use parking_lot::RwLock;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
+
+pub use oauth::{
+    DcrClient, authorization_request, client_credentials, exchange_code, pkce_pair, register_client,
+};
 
 /// Shared runtime state. Modules implement methods on this type.
 pub(crate) struct Inner {

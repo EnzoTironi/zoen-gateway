@@ -250,11 +250,14 @@ impl Inner {
                 })
             }
             Resolved::Dynamic(tool) => {
-                let result = self.invoke_dynamic(tool, &args).await?;
-                Ok(Outcome::Completed {
-                    result,
-                    execution_id: id.clone(),
-                })
+                let result = self.invoke_dynamic(tool, &args, id).await?;
+                match result {
+                    DynamicOut::Done(result) => Ok(Outcome::Completed {
+                        result,
+                        execution_id: id.clone(),
+                    }),
+                    DynamicOut::Paused(outcome) => Ok(outcome),
+                }
             }
         }
     }
@@ -288,18 +291,23 @@ impl Inner {
         Ok(Outcome::Paused { execution })
     }
 
-    async fn invoke_dynamic(&self, tool: &Tool, args: &Value) -> Result<ToolResult, ExecutorError> {
-        let id = ConnectionRef {
+    async fn invoke_dynamic(
+        &self,
+        tool: &Tool,
+        args: &Value,
+        execution_id: &ExecutionId,
+    ) -> Result<DynamicOut, ExecutorError> {
+        let conn_ref = ConnectionRef {
             owner: tool.owner,
             name: tool.connection.clone(),
             integration: tool.integration.clone(),
         };
         let store = Arc::clone(&self.store);
-        let conn_id = id.clone();
+        let lookup = conn_ref.clone();
         let slug = tool.integration.clone();
-        let conn = on_store(Arc::clone(&store), move |s| s.get_connection(&conn_id))
+        let conn = on_store(Arc::clone(&store), move |s| s.get_connection(&lookup))
             .await?
-            .ok_or_else(|| ExecutorError::ConnectionNotFound(id.as_key()))?;
+            .ok_or_else(|| ExecutorError::ConnectionNotFound(conn_ref.as_key()))?;
         let record = on_store(store, move |s| s.get_integration(&slug))
             .await?
             .ok_or_else(|| ExecutorError::IntegrationNotFound(tool.integration.clone()))?;
@@ -307,10 +315,23 @@ impl Inner {
             .plugins
             .get(record.integration.kind.as_str())
             .ok_or_else(|| ExecutorError::PluginNotLoaded(record.integration.kind.to_string()))?;
-        let values = self.resolve_secrets(&conn)?;
+        let mut values = self.resolve_secrets(&conn)?;
+        if let Some(paused) = crate::oauth::prepare(
+            &record.integration.auth_methods,
+            conn.template.as_str(),
+            &mut values,
+            &tool.cli_path(),
+            args,
+            execution_id,
+            self.limits.http_timeout,
+        )
+        .await?
+        {
+            return Ok(DynamicOut::Paused(paused));
+        }
         let ctx = InvokeCtx {
             integration: &record,
-            connection: &id,
+            connection: &conn_ref,
             template: &conn.template,
             tool,
             args,
@@ -320,6 +341,7 @@ impl Inner {
         plugin
             .invoke(ctx)
             .await
+            .map(DynamicOut::Done)
             .map_err(|e| ExecutorError::Plugin(e.0))
     }
 
@@ -396,22 +418,35 @@ impl Inner {
     ) -> Result<(), ExecutorError> {
         let state = match outcome {
             Outcome::Completed { result, .. } => ExecutionState::Completed(result.clone()),
-            Outcome::Paused { execution } => ExecutionState::Paused {
-                execution: execution.clone(),
-                address: match &execution.reason {
-                    PauseReason::Approval { address, .. } => address.clone(),
-                    PauseReason::Auth { .. } | PauseReason::Elicitation { .. } => String::new(),
-                },
-                args: match &execution.reason {
-                    PauseReason::Approval { args, .. } => args.clone(),
-                    PauseReason::Auth { .. } | PauseReason::Elicitation { .. } => Value::Null,
-                },
-                approved: false,
-            },
+            Outcome::Paused { execution } => {
+                let (address, args) = paused_resume_target(execution);
+                ExecutionState::Paused {
+                    execution: execution.clone(),
+                    address,
+                    args,
+                    approved: false,
+                }
+            }
         };
         let store = Arc::clone(&self.store);
         let persist_id = id.clone();
         on_store(store, move |s| s.put_execution(&persist_id, state)).await
+    }
+}
+
+enum DynamicOut {
+    Done(ToolResult),
+    Paused(Outcome),
+}
+
+fn paused_resume_target(execution: &executor_core::PausedExecution) -> (String, Value) {
+    match &execution.reason {
+        PauseReason::Approval { address, args, .. } => (address.clone(), args.clone()),
+        PauseReason::Auth { address, args, .. } => (
+            address.clone().unwrap_or_default(),
+            args.clone().unwrap_or(Value::Null),
+        ),
+        PauseReason::Elicitation { .. } => (String::new(), Value::Null),
     }
 }
 
@@ -423,7 +458,7 @@ fn resolved_invoke_path(tool: &Tool) -> String {
     }
 }
 
-async fn select_deadline<F>(
+pub async fn select_deadline<F>(
     run: F,
     cancel: CancellationToken,
     timeout: Duration,

@@ -112,6 +112,7 @@ impl Inner {
             values: &values,
             timeout: self.limits.http_timeout,
             max_tools: self.limits.max_tools_per_connection,
+            max_spec_bytes: self.limits.max_spec_bytes,
         };
         let resolved = plugin
             .resolve_tools(ctx)

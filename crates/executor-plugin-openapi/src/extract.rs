@@ -356,6 +356,21 @@ fn discovery_method(name: &str, method: &Value) -> Option<Operation> {
     })
 }
 
+/// Group operations by first tag (or `root`). Used to split Graph-scale specs.
+#[must_use]
+pub fn operations_by_tag(ops: &[Operation]) -> std::collections::BTreeMap<String, Vec<&Operation>> {
+    let mut map = std::collections::BTreeMap::<String, Vec<&Operation>>::new();
+    for op in ops {
+        let tag = op
+            .tag
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "root".to_owned());
+        map.entry(tag).or_default().push(op);
+    }
+    map
+}
+
 fn plan_tool_paths(ops: &[Operation]) -> Vec<(String, &Operation)> {
     let mut assigned: Vec<(String, &Operation)> = ops
         .iter()
@@ -459,7 +474,7 @@ fn split_words(value: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_operations, parse_spec, tools_from_operations};
+    use super::{extract_operations, operations_by_tag, parse_spec, tools_from_operations};
 
     #[test]
     fn openapi_paths_become_group_leaf() {
@@ -495,5 +510,23 @@ mod tests {
         let ops = extract_operations(&doc).unwrap();
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].method, "GET");
+    }
+
+    #[test]
+    fn splits_operations_by_tag() {
+        let spec = r#"{
+            "openapi":"3.0.0",
+            "info":{"title":"Big","version":"1"},
+            "paths":{
+                "/a":{"get":{"operationId":"a","tags":["alpha"],"responses":{"200":{}}}},
+                "/b":{"get":{"operationId":"b","tags":["beta"],"responses":{"200":{}}}}
+            }
+        }"#;
+        let doc = parse_spec(spec).unwrap();
+        let ops = extract_operations(&doc).unwrap();
+        let grouped = operations_by_tag(&ops);
+        assert_eq!(grouped.len(), 2);
+        assert!(grouped.contains_key("alpha"));
+        assert!(grouped.contains_key("beta"));
     }
 }

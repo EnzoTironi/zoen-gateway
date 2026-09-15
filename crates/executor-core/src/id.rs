@@ -200,4 +200,22 @@ impl ProviderKey {
     pub fn file() -> Self {
         Self("file".to_owned())
     }
+
+    /// 1Password CLI (`op read`).
+    #[must_use]
+    pub fn one_password() -> Self {
+        Self("1password".to_owned())
+    }
+
+    /// OS keychain / `secret-tool`.
+    #[must_use]
+    pub fn keychain() -> Self {
+        Self("keychain".to_owned())
+    }
+
+    /// `WorkOS` Vault HTTP.
+    #[must_use]
+    pub fn workos_vault() -> Self {
+        Self("workos_vault".to_owned())
+    }
 }

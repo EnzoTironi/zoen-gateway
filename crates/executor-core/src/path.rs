@@ -216,6 +216,14 @@ pub fn resolve_invocation(raw_path_parts: &[String]) -> Result<Invocation, ToolP
     Ok(Invocation { path, args })
 }
 
+/// Compile a single `call` into the code-mode subset (`return await tools[path](args)`).
+#[must_use]
+pub fn compile_call(path: &str, args: &Value) -> String {
+    let path = serde_json::to_string(path).unwrap_or_else(|_| "\"\"".into());
+    let args = serde_json::to_string(args).unwrap_or_else(|_| "{}".into());
+    format!("return await tools[{path}]({args});")
+}
+
 fn parse_json_object(raw: &str) -> Result<Map<String, Value>, ToolPathError> {
     let parsed: Value =
         serde_json::from_str(raw).map_err(|e| ToolPathError::InvalidJson(e.to_string()))?;
@@ -227,7 +235,10 @@ fn parse_json_object(raw: &str) -> Result<Map<String, Value>, ToolPathError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolPathError, build_tool_path, inspect_tool_path, resolve_invocation};
+    use super::{
+        ToolPathError, build_tool_path, compile_call, inspect_tool_path, resolve_invocation,
+    };
+    use serde_json::json;
 
     #[test]
     fn builds_and_inspects() {
@@ -266,5 +277,11 @@ mod tests {
     #[test]
     fn rejects_bad_segment() {
         assert!(build_tool_path(&["bad*"]).is_err());
+    }
+
+    #[test]
+    fn compiles_call_to_bracket_access() {
+        let src = compile_call("echo.org.work.ping", &json!({"n": 1}));
+        assert_eq!(src, r#"return await tools["echo.org.work.ping"]({"n":1});"#);
     }
 }

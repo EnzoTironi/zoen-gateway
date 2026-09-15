@@ -186,6 +186,12 @@ pub enum PauseReason {
         /// URL to open, when applicable.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         url: Option<String>,
+        /// Tool path to retry after the operator finishes auth.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        address: Option<String>,
+        /// Args to retry after auth.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args: Option<Value>,
     },
     /// Structured form elicitation.
     Elicitation {

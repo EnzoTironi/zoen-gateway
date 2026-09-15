@@ -231,6 +231,22 @@ async fn github_policy_block() {
 }
 
 #[tokio::test]
+async fn github_code_mode_get_user() {
+    let exec = in_memory(Limits::production());
+    add_github(&exec).await;
+    let path = find_tool(&exec, "github", "getauthenticated");
+    let src = executor_core::compile_call(&path, &json!({}));
+    let out = exec.run_code(&src, yes()).await.expect("code");
+    match out {
+        Outcome::Completed {
+            result: ToolResult::Ok { data, .. },
+            ..
+        } => assert_eq!(data["login"], "octocat", "{data}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn google_calendar_discovery_lists_events() {
     let emulate = urls();
     let discovery_url = format!("{}/discovery/v1/apis/calendar/v3/rest", emulate.google);
@@ -408,10 +424,7 @@ async fn daemon_http_executes_github() {
                 bind,
                 limits: Limits::production(),
             },
-            AppState {
-                executor: server,
-                metrics: None,
-            },
+            AppState::new(server, None),
             serve_cancel,
         )
         .await

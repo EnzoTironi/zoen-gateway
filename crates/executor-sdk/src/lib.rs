@@ -10,7 +10,7 @@ use executor_engine::Executor;
 use executor_plugin_graphql::GraphqlPlugin;
 use executor_plugin_mcp::McpPlugin;
 use executor_plugin_openapi::OpenApiPlugin;
-use executor_secrets::{FileSecrets, MemorySecrets};
+use executor_secrets::{FileSecrets, MemorySecrets, load_or_create_key};
 use executor_storage::SqliteCatalog;
 
 /// How to construct a process-local executor.
@@ -82,7 +82,8 @@ pub fn create_executor_with_metrics(
     }
     let dir = data_dir(opts.data_dir.as_deref());
     std::fs::create_dir_all(&dir).map_err(StorageError::new)?;
-    let secrets = FileSecrets::open(dir.join("secrets.json"))?;
+    let key = load_or_create_key(&dir.join("secret.key"))?;
+    let secrets = FileSecrets::open_encrypted(dir.join("secrets.json"), key)?;
     let db = SqliteCatalog::open(&dir.join("catalog.db"), opts.pool_size)?;
     builder = builder.secrets(Arc::new(secrets)).store(Arc::new(db));
     Ok(builder.build())

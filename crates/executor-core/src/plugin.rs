@@ -37,6 +37,8 @@ pub struct ResolveToolsCtx<'a> {
     pub timeout: Duration,
     /// Max tools this resolve may persist.
     pub max_tools: usize,
+    /// Max spec/introspection body the plugin may fetch or parse.
+    pub max_spec_bytes: usize,
 }
 
 /// Resolved plaintext credential inputs. Never a [`crate::SecretRef`].
