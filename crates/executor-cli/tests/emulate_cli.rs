@@ -77,9 +77,9 @@ fn call_github_via_cli() {
     assert!(stdout.contains("github"), "{stdout}");
     let tool_path = stdout
         .lines()
-        .find(|line| line.contains("github") && line.to_ascii_lowercase().contains("user"))
+        .find(|line| line.to_ascii_lowercase().contains("authenticated"))
         .and_then(|line| line.split('\t').next())
-        .expect("github user tool in `tools list`");
+        .expect("github authenticated-user tool in `tools list`");
     let call = json!({}).to_string();
     let (code, stdout, stderr) = run(dir.path(), &["call", "--yes", tool_path, &call]);
     assert_eq!(code, 0, "GET /user via CLI failed: {stdout}{stderr}");
