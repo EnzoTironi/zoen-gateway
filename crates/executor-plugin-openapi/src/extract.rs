@@ -11,7 +11,7 @@ const METHODS: [&str; 8] = [
 /// One extracted HTTP operation.
 #[derive(Clone, Debug)]
 pub struct Operation {
-    /// HTTP method (lowercase).
+    /// HTTP method (`GET`, `POST`, …).
     pub method: String,
     /// Path template.
     pub path: String,
@@ -205,7 +205,7 @@ fn operation_from(
         .unwrap_or("")
         .to_owned();
     Operation {
-        method: method.to_owned(),
+        method: method.to_ascii_uppercase(),
         path: path.to_owned(),
         operation_id,
         tag,
@@ -330,7 +330,7 @@ fn discovery_method(name: &str, method: &Value) -> Option<Operation> {
         }
     }
     Some(Operation {
-        method: http.to_ascii_lowercase(),
+        method: http.to_ascii_uppercase(),
         path: format!("/{path}"),
         operation_id: method
             .get("id")
@@ -486,6 +486,6 @@ mod tests {
         let doc = parse_spec(spec).unwrap();
         let ops = extract_operations(&doc).unwrap();
         assert_eq!(ops.len(), 1);
-        assert_eq!(ops[0].method, "get");
+        assert_eq!(ops[0].method, "GET");
     }
 }

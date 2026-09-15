@@ -42,6 +42,8 @@ pub async fn invoke_operation(
         .get("method")
         .and_then(Value::as_str)
         .ok_or_else(|| PluginError::new("missing method in plugin_meta"))?;
+    // OpenAPI stores methods in lowercase; HTTP/1.1 requires the token `GET`.
+    let method = method.to_ascii_uppercase();
     let template = meta
         .get("path")
         .and_then(Value::as_str)
@@ -347,6 +349,10 @@ mod tests {
         .await
         .unwrap();
         let raw = server.await.unwrap();
+        assert!(
+            raw.starts_with("GET "),
+            "HTTP method must be uppercase; request was:\n{raw}"
+        );
         assert!(
             raw.lines()
                 .any(|line| line.to_ascii_lowercase().starts_with("host:")),
