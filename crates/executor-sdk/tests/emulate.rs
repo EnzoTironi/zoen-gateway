@@ -491,11 +491,43 @@ async fn daemon_http_executes_github() {
         .expect("mcp json");
     let listed = mcp["result"]["tools"].as_array().expect("tools array");
     assert!(
-        listed
-            .iter()
-            .any(|t| t["name"].as_str().is_some_and(|n| n.contains("github"))),
+        listed.iter().any(|t| t["name"].as_str() == Some("execute")),
+        "default MCP tools/list should expose execute: {mcp}"
+    );
+    assert!(
+        listed.iter().any(|t| t["name"].as_str() == Some("skills")),
         "{mcp}"
     );
+    assert!(
+        listed.iter().any(|t| t["name"].as_str() == Some("resume")),
+        "{mcp}"
+    );
+    assert!(
+        listed
+            .iter()
+            .all(|t| t["name"].as_str().is_none_or(|n| !n.contains("github"))),
+        "catalog dump must not leak into default MCP tools/list: {mcp}"
+    );
+    let health = client
+        .get(format!("http://{bind}/api/health"))
+        .send()
+        .await
+        .expect("api health")
+        .text()
+        .await
+        .expect("text");
+    assert_eq!(health, "ok");
+    let exec_body = client
+        .post(format!("http://{bind}/executions"))
+        .json(&json!({"code": "return 2 + 2;", "autoApprove": true}))
+        .send()
+        .await
+        .expect("executions")
+        .json::<Value>()
+        .await
+        .expect("json");
+    assert_eq!(exec_body["status"], "completed", "{exec_body}");
+    assert_eq!(exec_body["structured"]["data"], 4, "{exec_body}");
     cancel.cancel();
     let _ = handle.await;
 }

@@ -52,6 +52,12 @@ CREATE TABLE IF NOT EXISTS idempotency (
   key TEXT PRIMARY KEY,
   execution_id TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS kv (
+  collection TEXT NOT NULL,
+  id TEXT NOT NULL,
+  body TEXT NOT NULL,
+  PRIMARY KEY (collection, id)
+);
 ";
 
 /// Pooled SQLite-backed [`CatalogStore`].
@@ -407,6 +413,65 @@ impl CatalogStore for SqliteCatalog {
                     })?))
                 }
             }
+        })
+    }
+
+    fn put_kv(
+        &self,
+        collection: &str,
+        id: &str,
+        body: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let text = serde_json::to_string(&body).map_err(|e| StorageError::new(e.to_string()))?;
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO kv(collection, id, body) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(collection, id) DO UPDATE SET body=excluded.body",
+                params![collection, id, text],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn get_kv(
+        &self,
+        collection: &str,
+        id: &str,
+    ) -> Result<Option<serde_json::Value>, StorageError> {
+        self.with(|c| {
+            let body: Option<String> = c
+                .query_row(
+                    "SELECT body FROM kv WHERE collection=?1 AND id=?2",
+                    params![collection, id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match body {
+                None => Ok(None),
+                Some(b) => Ok(Some(serde_json::from_str(&b).map_err(json_err)?)),
+            }
+        })
+    }
+
+    fn list_kv(&self, collection: &str) -> Result<Vec<serde_json::Value>, StorageError> {
+        self.with(|c| {
+            let mut stmt = c.prepare("SELECT body FROM kv WHERE collection=?1")?;
+            let rows = stmt.query_map(params![collection], |r| r.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(serde_json::from_str(&row?).map_err(json_err)?);
+            }
+            Ok(out)
+        })
+    }
+
+    fn delete_kv(&self, collection: &str, id: &str) -> Result<bool, StorageError> {
+        self.with(|c| {
+            let n = c.execute(
+                "DELETE FROM kv WHERE collection=?1 AND id=?2",
+                params![collection, id],
+            )?;
+            Ok(n > 0)
         })
     }
 }

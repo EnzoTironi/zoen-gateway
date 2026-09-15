@@ -91,13 +91,35 @@ impl Inner {
         match name {
             "executor.coreTools.integrations.list" => self.st_integrations_list(),
             "executor.coreTools.integrations.remove" => self.st_integrations_remove(args),
+            "executor.coreTools.integrations.detect" => self.st_integrations_detect(args),
             "executor.coreTools.connections.list" => self.st_connections_list(args),
             "executor.coreTools.connections.create" => self.st_connections_create(args).await,
+            "executor.coreTools.connections.createHandoff" => {
+                Self::st_connections_create_handoff(args)
+            }
             "executor.coreTools.connections.remove" => self.st_connections_remove(args),
             "executor.coreTools.connections.refresh" => self.st_connections_refresh(args).await,
             "executor.coreTools.policies.list" => self.st_policies_list(),
             "executor.coreTools.policies.create" => self.st_policies_create(args),
+            "executor.coreTools.policies.update" => self.st_policies_update(args),
             "executor.coreTools.policies.remove" => self.st_policies_remove(args),
+            "executor.coreTools.providers.list" => self.st_providers_list(),
+            "executor.coreTools.providers.items" => self.st_providers_items(args),
+            "executor.coreTools.oauth.clients.list" => self.st_oauth_clients_list(),
+            "executor.coreTools.oauth.clients.create" => self.st_oauth_clients_create(args),
+            "executor.coreTools.oauth.clients.createHandoff" => {
+                Self::st_oauth_clients_create_handoff(args)
+            }
+            "executor.coreTools.oauth.clients.registerDynamic" => {
+                self.st_oauth_clients_register_dynamic(args).await
+            }
+            "executor.coreTools.oauth.clients.remove" => self.st_oauth_clients_remove(args),
+            "executor.coreTools.oauth.probe" => self.st_oauth_probe(args).await,
+            "executor.coreTools.oauth.start" => self.st_oauth_start(args),
+            "executor.coreTools.oauth.cancel" => self.st_oauth_cancel(args),
+            "executor.coreTools.toolkits.list" => self.st_toolkits_list(),
+            "executor.coreTools.toolkits.create" => self.st_toolkits_create(args),
+            "executor.coreTools.toolkits.remove" => self.st_toolkits_remove(args),
             OPENAPI_ADD | OPENAPI_ADD_ALIAS => self.st_openapi_add(args),
             GRAPHQL_ADD => self.st_graphql_add(args),
             MCP_ADD => self.st_mcp_add(args),
@@ -394,6 +416,9 @@ fn push_core_tools(tools: &mut BTreeMap<String, Tool>) {
     push_integration_tools(tools);
     push_connection_tools(tools);
     push_policy_tools(tools);
+    push_provider_tools(tools);
+    push_oauth_tools(tools);
+    push_toolkit_tools(tools);
 }
 
 fn push_integration_tools(tools: &mut BTreeMap<String, Tool>) {
@@ -410,6 +435,13 @@ fn push_integration_tools(tools: &mut BTreeMap<String, Tool>) {
         "Remove a removable integration.",
         json!({"type":"object","required":["slug"],"properties":{"slug":{"type":"string"}}}),
         true,
+    );
+    push_static(
+        tools,
+        "executor.coreTools.integrations.detect",
+        "Detect which plugin can claim a URL (OpenAPI, GraphQL, MCP, Google, Microsoft Graph).",
+        json!({"type":"object","required":["url"],"properties":{"url":{"type":"string"}}}),
+        false,
     );
 }
 
@@ -444,6 +476,22 @@ fn push_connection_tools(tools: &mut BTreeMap<String, Tool>) {
             }
         }),
         true,
+    );
+    push_static(
+        tools,
+        "executor.coreTools.connections.createHandoff",
+        "Return a URL/instructions for creating a connection without pasting secrets into chat.",
+        json!({
+            "type":"object",
+            "required":["integration"],
+            "properties":{
+                "integration":{"type":"string"},
+                "owner":{"type":"string","enum":["org","user"]},
+                "template":{"type":"string"},
+                "label":{"type":"string"}
+            }
+        }),
+        false,
     );
     push_static(
         tools,
@@ -502,9 +550,201 @@ fn push_policy_tools(tools: &mut BTreeMap<String, Tool>) {
     );
     push_static(
         tools,
+        "executor.coreTools.policies.update",
+        "Update a tool policy's pattern or action.",
+        json!({
+            "type":"object",
+            "required":["id"],
+            "properties":{
+                "id":{"type":"string"},
+                "owner":{"type":"string","enum":["org","user"]},
+                "pattern":{"type":"string"},
+                "action":{"type":"string","enum":["approve","require_approval","block"]}
+            }
+        }),
+        true,
+    );
+    push_static(
+        tools,
         "executor.coreTools.policies.remove",
         "Remove a policy by id.",
         json!({"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}),
+        true,
+    );
+}
+
+fn push_provider_tools(tools: &mut BTreeMap<String, Tool>) {
+    push_static(
+        tools,
+        "executor.coreTools.providers.list",
+        "List secret providers available in this process.",
+        json!({"type":"object","properties":{}}),
+        false,
+    );
+    push_static(
+        tools,
+        "executor.coreTools.providers.items",
+        "List items in a secret provider.",
+        json!({
+            "type":"object",
+            "required":["provider"],
+            "properties":{"provider":{"type":"string"}}
+        }),
+        false,
+    );
+}
+
+fn push_oauth_tools(tools: &mut BTreeMap<String, Tool>) {
+    push_oauth_client_tools(tools);
+    push_oauth_flow_tools(tools);
+}
+
+fn push_oauth_client_tools(tools: &mut BTreeMap<String, Tool>) {
+    push_static(
+        tools,
+        "executor.coreTools.oauth.clients.list",
+        "List registered OAuth clients (never includes client secrets).",
+        json!({"type":"object","properties":{}}),
+        false,
+    );
+    push_static(
+        tools,
+        "executor.coreTools.oauth.clients.create",
+        "Register a PUBLIC OAuth client (no secret). Confidential apps use createHandoff.",
+        json!({
+            "type":"object",
+            "required":["slug","authorizationUrl","tokenUrl","clientId"],
+            "properties":{
+                "owner":{"type":"string","enum":["org","user"]},
+                "slug":{"type":"string"},
+                "authorizationUrl":{"type":"string"},
+                "tokenUrl":{"type":"string"},
+                "grant":{"type":"string","enum":["authorization_code","client_credentials"]},
+                "clientId":{"type":"string"},
+                "resource":{"type":"string"},
+                "originIntegration":{"type":"string"}
+            }
+        }),
+        true,
+    );
+    push_static(
+        tools,
+        "executor.coreTools.oauth.clients.createHandoff",
+        "Return instructions for registering a confidential OAuth app without sending the secret to the agent.",
+        json!({
+            "type":"object",
+            "required":["integration"],
+            "properties":{
+                "integration":{"type":"string"},
+                "owner":{"type":"string","enum":["org","user"]},
+                "slug":{"type":"string"}
+            }
+        }),
+        false,
+    );
+    push_static(
+        tools,
+        "executor.coreTools.oauth.clients.registerDynamic",
+        "RFC 7591 dynamic client registration at a registration endpoint.",
+        json!({
+            "type":"object",
+            "required":["slug","registrationEndpoint","authorizationUrl","tokenUrl"],
+            "properties":{
+                "owner":{"type":"string","enum":["org","user"]},
+                "slug":{"type":"string"},
+                "issuer":{"type":"string"},
+                "registrationEndpoint":{"type":"string"},
+                "authorizationUrl":{"type":"string"},
+                "tokenUrl":{"type":"string"},
+                "resource":{"type":"string"},
+                "scopes":{"type":"array","items":{"type":"string"}},
+                "redirectUri":{"type":"string"},
+                "originIntegration":{"type":"string"}
+            }
+        }),
+        true,
+    );
+    push_static(
+        tools,
+        "executor.coreTools.oauth.clients.remove",
+        "Remove a stored OAuth client registration.",
+        json!({
+            "type":"object",
+            "required":["slug"],
+            "properties":{
+                "owner":{"type":"string","enum":["org","user"]},
+                "slug":{"type":"string"}
+            }
+        }),
+        true,
+    );
+}
+
+fn push_oauth_flow_tools(tools: &mut BTreeMap<String, Tool>) {
+    push_static(
+        tools,
+        "executor.coreTools.oauth.probe",
+        "Fetch OAuth/OIDC metadata for a URL.",
+        json!({"type":"object","required":["url"],"properties":{"url":{"type":"string"}}}),
+        false,
+    );
+    push_static(
+        tools,
+        "executor.coreTools.oauth.start",
+        "Start an authorization-code login for a stored public OAuth client.",
+        json!({
+            "type":"object",
+            "required":["client","name","integration"],
+            "properties":{
+                "client":{"type":"string"},
+                "clientOwner":{"type":"string","enum":["org","user"]},
+                "owner":{"type":"string","enum":["org","user"]},
+                "name":{"type":"string"},
+                "integration":{"type":"string"},
+                "template":{"type":"string"},
+                "redirectUri":{"type":"string"}
+            }
+        }),
+        true,
+    );
+    push_static(
+        tools,
+        "executor.coreTools.oauth.cancel",
+        "Cancel an in-flight OAuth session by state.",
+        json!({"type":"object","required":["state"],"properties":{"state":{"type":"string"}}}),
+        false,
+    );
+}
+
+fn push_toolkit_tools(tools: &mut BTreeMap<String, Tool>) {
+    push_static(
+        tools,
+        "executor.coreTools.toolkits.list",
+        "List named toolkits (scoped MCP surfaces).",
+        json!({"type":"object","properties":{}}),
+        false,
+    );
+    push_static(
+        tools,
+        "executor.coreTools.toolkits.create",
+        "Create a toolkit that exposes a subset of connections at /mcp/toolkits/:slug.",
+        json!({
+            "type":"object",
+            "required":["slug"],
+            "properties":{
+                "slug":{"type":"string"},
+                "name":{"type":"string"},
+                "owner":{"type":"string","enum":["org","user"]},
+                "connections":{"type":"array","items":{"type":"string"}}
+            }
+        }),
+        true,
+    );
+    push_static(
+        tools,
+        "executor.coreTools.toolkits.remove",
+        "Remove a toolkit by slug.",
+        json!({"type":"object","required":["slug"],"properties":{"slug":{"type":"string"}}}),
         true,
     );
 }
@@ -519,6 +759,7 @@ fn add_spec_schema() -> Value {
             "description":{"type":"string"},
             "baseUrl":{"type":"string"},
             "tag":{"type":"string"},
+            "preset":{"type":"string"},
             "spec":{}
         }
     })
@@ -556,6 +797,9 @@ fn openapi_config(args: &Value) -> Result<Value, executor_core::ExecutorError> {
     }
     if let Some(tag) = args.get("tag").and_then(Value::as_str) {
         config.insert("tag".into(), Value::String(tag.to_owned()));
+    }
+    if let Some(preset) = args.get("preset").and_then(Value::as_str) {
+        config.insert("preset".into(), Value::String(preset.to_owned()));
     }
     copy_oauth_config(args, &mut config);
     Ok(Value::Object(config))

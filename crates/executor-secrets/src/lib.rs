@@ -32,6 +32,27 @@ pub trait SecretResolver: Send + Sync {
     ///
     /// Backend failure.
     fn store_default(&self, value: &str) -> Result<SecretRef, ExecutorError>;
+
+    /// Provider keys this process can name (`providers.list`).
+    fn list_providers(&self) -> Vec<String> {
+        vec![
+            "default".into(),
+            "env".into(),
+            "file".into(),
+            "1password".into(),
+            "keychain".into(),
+            "workos_vault".into(),
+        ]
+    }
+
+    /// Items in one provider (`providers.items`). Default: empty.
+    ///
+    /// # Errors
+    ///
+    /// Backend failure.
+    fn list_items(&self, _provider: &str) -> Result<Vec<(String, String)>, ExecutorError> {
+        Ok(Vec::new())
+    }
 }
 
 /// In-memory default store plus env/file/provider resolvers.
@@ -74,6 +95,18 @@ impl SecretResolver for MemorySecrets {
             provider: ProviderKey::default_store(),
             item: ProviderItemId::new(&id).map_err(ExecutorError::from)?,
         })
+    }
+
+    fn list_items(&self, provider: &str) -> Result<Vec<(String, String)>, ExecutorError> {
+        if provider != "default" {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .items
+            .read()
+            .keys()
+            .map(|id| (id.clone(), id.clone()))
+            .collect())
     }
 }
 
@@ -169,6 +202,10 @@ impl SecretResolver for FileSecrets {
         let stored = self.inner.store_default(value)?;
         self.persist()?;
         Ok(stored)
+    }
+
+    fn list_items(&self, provider: &str) -> Result<Vec<(String, String)>, ExecutorError> {
+        self.inner.list_items(provider)
     }
 }
 

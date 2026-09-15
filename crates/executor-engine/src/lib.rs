@@ -7,6 +7,7 @@
 #![allow(clippy::result_large_err)] // ExecutorError is the domain error; boxing hides fields.
 #![allow(clippy::module_name_repetitions)] // `Executor` vocabulary (`ExecuteOptions` lives in core).
 
+mod agent_catalog;
 mod catalog;
 mod code;
 mod ema;
@@ -347,6 +348,91 @@ impl Executor {
         let mut ids: Vec<String> = self.inner.plugins.keys().cloned().collect();
         ids.sort();
         ids
+    }
+
+    /// Run each plugin's `detect` against `url`.
+    #[must_use]
+    pub fn detect(&self, url: &str) -> Vec<executor_core::Detection> {
+        let mut hits: Vec<executor_core::Detection> = self
+            .inner
+            .plugins
+            .values()
+            .filter_map(|p| p.detect(url))
+            .collect();
+        hits.sort_by(|a, b| a.kind.as_str().cmp(b.kind.as_str()));
+        hits
+    }
+
+    /// Policies in the catalog.
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn list_policies(&self) -> Result<Vec<executor_core::ToolPolicy>, ExecutorError> {
+        Ok(self.inner.store.list_policies()?)
+    }
+
+    /// Load a persisted execution (paused or completed).
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn get_execution(
+        &self,
+        id: &ExecutionId,
+    ) -> Result<Option<executor_core::ExecutionState>, ExecutorError> {
+        Ok(self.inner.store.get_execution(id)?)
+    }
+
+    /// Load a toolkit by slug.
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn toolkit_by_slug(
+        &self,
+        slug: &str,
+    ) -> Result<Option<executor_core::Toolkit>, ExecutorError> {
+        let Some(body) = self.inner.store.get_kv(executor_core::KV_TOOLKITS, slug)? else {
+            return Ok(None);
+        };
+        Ok(serde_json::from_value(body).ok())
+    }
+
+    /// KV put (toolkits / oauth clients).
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn put_kv(
+        &self,
+        collection: &str,
+        id: &str,
+        body: serde_json::Value,
+    ) -> Result<(), ExecutorError> {
+        Ok(self.inner.store.put_kv(collection, id, body)?)
+    }
+
+    /// KV get.
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn get_kv(
+        &self,
+        collection: &str,
+        id: &str,
+    ) -> Result<Option<serde_json::Value>, ExecutorError> {
+        Ok(self.inner.store.get_kv(collection, id)?)
+    }
+
+    /// KV list.
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn list_kv(&self, collection: &str) -> Result<Vec<serde_json::Value>, ExecutorError> {
+        Ok(self.inner.store.list_kv(collection)?)
     }
 }
 

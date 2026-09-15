@@ -9,6 +9,13 @@ const fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_executor")
 }
 
+fn stop(dir: &std::path::Path) {
+    let _ = Command::new(bin())
+        .env("EXECUTOR_DATA_DIR", dir)
+        .args(["daemon", "stop"])
+        .output();
+}
+
 fn run(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
     let out = Command::new(bin())
         .env("EXECUTOR_DATA_DIR", dir)
@@ -40,6 +47,7 @@ fn help_and_empty_integrations() {
     let (code, stdout, stderr) = run(dir.path(), &["tools", "integrations"]);
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("(no integrations)"), "{stdout}");
+    stop(dir.path());
 }
 
 #[test]
@@ -91,8 +99,11 @@ fn call_github_via_cli() {
     let (code, stdout, stderr) = run(dir.path(), &["call", "--yes", tool_path, &call]);
     assert_eq!(code, 0, "GET /user via CLI failed: {stdout}{stderr}");
     let parsed: Value = serde_json::from_str(&stdout).unwrap_or_else(|_| json!({}));
-    let login = parsed.pointer("/result/data/login");
+    let login = parsed
+        .pointer("/structured/data/login")
+        .or_else(|| parsed.pointer("/result/data/login"));
     assert_eq!(login, Some(&json!("octocat")), "{stdout}");
+    stop(dir.path());
 }
 
 #[test]
@@ -108,7 +119,14 @@ fn call_js_isolate_via_cli() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code().unwrap_or(1), 0, "{stdout}{stderr}");
     let parsed: Value = serde_json::from_str(&stdout).unwrap_or_else(|_| json!({}));
-    assert_eq!(parsed.pointer("/result/data"), Some(&json!(3)), "{stdout}");
+    assert_eq!(
+        parsed
+            .pointer("/structured/data")
+            .or_else(|| parsed.pointer("/result/data")),
+        Some(&json!(3)),
+        "{stdout}"
+    );
+    stop(dir.path());
 }
 
 #[test]

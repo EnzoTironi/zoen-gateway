@@ -24,8 +24,14 @@ impl IntegrationPlugin for EchoPlugin {
         PluginId::new("echo").expect("echo")
     }
 
-    fn detect(&self, _: &str) -> Option<Detection> {
-        None
+    fn detect(&self, candidate: &str) -> Option<Detection> {
+        candidate.starts_with("echo:").then(|| Detection {
+            kind: PluginId::new("echo").expect("echo"),
+            confidence: executor_core::DetectionConfidence::High,
+            endpoint: candidate.to_owned(),
+            name: "Echo".into(),
+            slug: "echo".into(),
+        })
     }
 
     fn describe_auth(&self, _: &IntegrationConfig) -> Vec<AuthMethod> {
@@ -412,4 +418,112 @@ async fn code_mode_js_control_flow() {
         } => assert_eq!(data["doubled"], 8, "{data}"),
         other => panic!("{other:?}"),
     }
+}
+
+#[tokio::test]
+async fn ranked_search_and_describe_tool() {
+    let exec = wired(Arc::new(EchoPlugin), Limits::production(), "echo").await;
+    let page = exec
+        .search_ranked(&json!({"query": "ping", "limit": 5}))
+        .expect("search");
+    let items = page["items"].as_array().expect("items");
+    assert!(!items.is_empty(), "{page}");
+    assert_eq!(items[0]["name"], "ping");
+    let shape = exec.describe_shape("echo.org.work.ping");
+    assert!(
+        shape["inputTypeScript"]
+            .as_str()
+            .is_some_and(|s| s.contains("n?")),
+        "{shape}"
+    );
+}
+
+#[tokio::test]
+async fn typescript_strip_in_code_mode() {
+    let exec = wired(Arc::new(EchoPlugin), Limits::production(), "echo").await;
+    let src = "const n: number = 3;\nreturn n;";
+    let out = exec
+        .run_code(
+            src,
+            ExecuteOptions {
+                auto_approve: true,
+                ..ExecuteOptions::default()
+            },
+        )
+        .await
+        .expect("strip");
+    match out {
+        Outcome::Completed {
+            result: ToolResult::Ok { data, .. },
+            ..
+        } => assert_eq!(data, json!(3)),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn auto() -> ExecuteOptions {
+    ExecuteOptions {
+        auto_approve: true,
+        ..ExecuteOptions::default()
+    }
+}
+
+async fn data_ok(exec: &Executor, path: &str, args: serde_json::Value) -> serde_json::Value {
+    match exec.execute(path, args, auto()).await.expect(path) {
+        Outcome::Completed {
+            result: ToolResult::Ok { data, .. },
+            ..
+        } => data,
+        other => panic!("{path}: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn detect_and_policy_update() {
+    let exec = wired(Arc::new(EchoPlugin), Limits::production(), "echo").await;
+    let hits = data_ok(
+        &exec,
+        "executor.coreTools.integrations.detect",
+        json!({"url": "echo://box"}),
+    )
+    .await;
+    assert_eq!(hits["results"][0]["slug"], "echo");
+    let created = data_ok(
+        &exec,
+        "executor.coreTools.policies.create",
+        json!({"pattern": "echo.*", "action": "approve", "owner": "org"}),
+    )
+    .await;
+    let id = created["id"].as_str().expect("id");
+    let updated = data_ok(
+        &exec,
+        "executor.coreTools.policies.update",
+        json!({"id": id, "action": "block"}),
+    )
+    .await;
+    assert_eq!(updated["action"], "block");
+}
+
+#[tokio::test]
+async fn oauth_client_and_providers() {
+    let exec = wired(Arc::new(EchoPlugin), Limits::production(), "echo").await;
+    let client = data_ok(
+        &exec,
+        "executor.coreTools.oauth.clients.create",
+        json!({
+            "slug": "pub",
+            "authorizationUrl": "https://example.test/auth",
+            "tokenUrl": "https://example.test/token",
+            "clientId": "cid"
+        }),
+    )
+    .await;
+    assert_eq!(client["clientId"], "cid");
+    let providers = data_ok(&exec, "executor.coreTools.providers.list", json!({})).await;
+    assert!(
+        providers["providers"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()),
+        "{providers}"
+    );
 }

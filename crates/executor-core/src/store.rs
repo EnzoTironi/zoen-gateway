@@ -150,6 +150,40 @@ pub trait CatalogStore: Send + Sync {
     ///
     /// Backend failure.
     fn get_idempotency(&self, key: &str) -> Result<Option<ExecutionId>, StorageError>;
+
+    /// Upsert a JSON document in a named collection (`toolkits`, `oauth_clients`, …).
+    ///
+    /// # Errors
+    ///
+    /// Backend failure.
+    fn put_kv(
+        &self,
+        collection: &str,
+        id: &str,
+        body: serde_json::Value,
+    ) -> Result<(), StorageError>;
+
+    /// Fetch one JSON document.
+    ///
+    /// # Errors
+    ///
+    /// Backend failure.
+    fn get_kv(&self, collection: &str, id: &str)
+    -> Result<Option<serde_json::Value>, StorageError>;
+
+    /// List documents in a collection.
+    ///
+    /// # Errors
+    ///
+    /// Backend failure.
+    fn list_kv(&self, collection: &str) -> Result<Vec<serde_json::Value>, StorageError>;
+
+    /// Delete one document. Returns whether it existed.
+    ///
+    /// # Errors
+    ///
+    /// Backend failure.
+    fn delete_kv(&self, collection: &str, id: &str) -> Result<bool, StorageError>;
 }
 
 /// Optional blob namespace (pending approvals, spec bodies).
@@ -185,6 +219,7 @@ struct MemoryInner {
     executions: BTreeMap<String, ExecutionState>,
     idempotency: BTreeMap<String, ExecutionId>,
     blobs: BTreeMap<(String, String), Vec<u8>>,
+    kv: BTreeMap<(String, String), serde_json::Value>,
 }
 
 /// In-process catalog. Used by tests and as the default when no sqlite path is set.
@@ -354,6 +389,52 @@ impl CatalogStore for MemoryCatalog {
 
     fn get_idempotency(&self, key: &str) -> Result<Option<ExecutionId>, StorageError> {
         Ok(self.inner.read().idempotency.get(key).cloned())
+    }
+
+    fn put_kv(
+        &self,
+        collection: &str,
+        id: &str,
+        body: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .write()
+            .kv
+            .insert((collection.to_owned(), id.to_owned()), body);
+        Ok(())
+    }
+
+    fn get_kv(
+        &self,
+        collection: &str,
+        id: &str,
+    ) -> Result<Option<serde_json::Value>, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .kv
+            .get(&(collection.to_owned(), id.to_owned()))
+            .cloned())
+    }
+
+    fn list_kv(&self, collection: &str) -> Result<Vec<serde_json::Value>, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .kv
+            .iter()
+            .filter(|((c, _), _)| c == collection)
+            .map(|(_, v)| v.clone())
+            .collect())
+    }
+
+    fn delete_kv(&self, collection: &str, id: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .inner
+            .write()
+            .kv
+            .remove(&(collection.to_owned(), id.to_owned()))
+            .is_some())
     }
 }
 

@@ -506,6 +506,7 @@ dependencies = [
  "executor-core",
  "executor-engine",
  "getrandom 0.2.17",
+ "hex",
  "http-body-util",
  "parking_lot",
  "reqwest",

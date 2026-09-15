@@ -2,6 +2,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+mod daemon;
 mod login;
 mod mcp_bridge;
 mod profiles;
@@ -11,12 +12,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use executor_core::{
-    ExecuteOptions, ExecutionId, IdempotencyKey, ResumeAction, ToolListFilter, compile_call,
-    resolve_invocation, unix_now_ms,
-};
+use executor_core::{compile_call, resolve_invocation, unix_now_ms};
 use executor_host::{AppState, DEFAULT_PORT, DEFAULT_SERVICE_PORT, HostConfig, serve};
-use executor_sdk::{CreateOptions, create_executor, create_executor_with_metrics, data_dir};
+use executor_sdk::{CreateOptions, create_executor_with_metrics, data_dir};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -59,14 +57,27 @@ enum Commands {
         /// accept | decline | cancel
         #[arg(long, default_value = "accept")]
         action: String,
+        /// JSON content for form elicitations.
+        #[arg(long)]
+        content: Option<String>,
     },
     /// Tool catalog.
     Tools {
         #[command(subcommand)]
         cmd: ToolsCmd,
     },
-    /// MCP stdio host (bridges to the daemon when it is up).
-    Mcp,
+    /// MCP stdio host (always bridges to the daemon `/mcp`).
+    Mcp {
+        /// `code` (default) or `passthrough`.
+        #[arg(long, default_value = "code")]
+        mode: String,
+        /// `browser` (default) or `model`.
+        #[arg(long, default_value = "browser")]
+        elicitation_mode: String,
+        /// Register `search_<integration>` tools.
+        #[arg(long)]
+        search_tools: bool,
+    },
     /// Foreground HTTP daemon (loopback).
     Serve {
         #[arg(long, default_value_t = DEFAULT_PORT)]
@@ -225,14 +236,20 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Commands::Resume {
             execution_id,
             action,
-        } => cmd_resume(dir.as_deref(), execution_id, action).await,
-        Commands::Tools { cmd } => cmd_tools(dir.as_deref(), cmd),
-        Commands::Mcp => {
-            let exec = create_executor(CreateOptions {
-                data_dir: dir,
-                ..CreateOptions::default()
-            })?;
-            mcp_bridge::run(exec, None).await?;
+            content,
+        } => cmd_resume(dir.as_deref(), execution_id, action, content).await,
+        Commands::Tools { cmd } => cmd_tools(dir.as_deref(), cmd).await,
+        Commands::Mcp {
+            mode,
+            elicitation_mode,
+            search_tools,
+        } => {
+            let origin = daemon::ensure_daemon(dir.as_deref()).await?;
+            let mut q = format!("?mode={mode}&elicitation_mode={elicitation_mode}");
+            if search_tools {
+                q.push_str("&search_tools=true");
+            }
+            mcp_bridge::run(&origin, &q).await?;
             Ok(())
         }
         Commands::Serve { port } => daemon_run(dir.as_deref(), port).await,
@@ -254,7 +271,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Commands::Service {
             cmd: ServiceCmd::Restart { port },
         } => {
-            daemon_stop(dir.as_deref());
+            daemon::stop(dir.as_deref());
             daemon_run(dir.as_deref(), port).await
         }
         Commands::Login {
@@ -288,11 +305,11 @@ async fn daemon_cmd(
             Ok(())
         }
         DaemonCmd::Stop => {
-            daemon_stop(dir);
+            daemon::stop(dir);
             Ok(())
         }
         DaemonCmd::Restart { port } => {
-            daemon_stop(dir);
+            daemon::stop(dir);
             daemon_run(dir, port).await
         }
     }
@@ -305,24 +322,22 @@ async fn cmd_call(
     yes: bool,
     idempotency_key: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let exec = create_executor(CreateOptions {
-        data_dir: dir.map(Path::to_path_buf),
-        ..CreateOptions::default()
-    })?;
-    let key = idempotency_key.map(IdempotencyKey::new).transpose()?;
-    let opts = ExecuteOptions {
-        auto_approve: yes,
-        timeout: None,
-        idempotency_key: key,
-    };
+    let origin = daemon::ensure_daemon(dir).await?;
     let source = if let Some(code) = code {
         code
     } else {
         let invocation = resolve_invocation(&path)?;
         compile_call(&invocation.path, &Value::Object(invocation.args))
     };
-    let outcome = exec.run_code(&source, opts).await?;
-    println!("{}", serde_json::to_string_pretty(&outcome.cli_json())?);
+    let mut body = json!({
+        "code": source,
+        "autoApprove": yes,
+    });
+    if let Some(key) = idempotency_key {
+        body["idempotencyKey"] = json!(key);
+    }
+    let outcome = daemon::post_json(&origin, "/executions", &body).await?;
+    println!("{}", serde_json::to_string_pretty(&outcome)?);
     Ok(())
 }
 
@@ -330,75 +345,104 @@ async fn cmd_resume(
     dir: Option<&Path>,
     execution_id: String,
     action: String,
+    content: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let exec = create_executor(CreateOptions {
-        data_dir: dir.map(Path::to_path_buf),
-        ..CreateOptions::default()
-    })?;
-    let id = ExecutionId::new(execution_id)?;
-    let action = match action.as_str() {
-        "accept" => ResumeAction::Accept,
-        "decline" => ResumeAction::Decline,
-        "cancel" => ResumeAction::Cancel,
-        other => return Err(format!("unknown action {other}").into()),
-    };
-    let outcome = exec.resume(&id, action).await?;
-    println!("{}", serde_json::to_string_pretty(&outcome.cli_json())?);
+    let origin = daemon::ensure_daemon(dir).await?;
+    let mut body = json!({ "action": action });
+    if let Some(raw) = content {
+        body["content"] = serde_json::from_str(&raw).unwrap_or(Value::String(raw));
+    }
+    let path = format!("/executions/{execution_id}/resume");
+    let outcome = daemon::post_json(&origin, &path, &body).await?;
+    println!("{}", serde_json::to_string_pretty(&outcome)?);
     Ok(())
 }
 
-fn cmd_tools(
+async fn cmd_tools(
     dir: Option<&Path>,
     cmd: ToolsCmd,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let exec = create_executor(CreateOptions {
-        data_dir: dir.map(Path::to_path_buf),
-        ..CreateOptions::default()
-    })?;
+    let origin = daemon::ensure_daemon(dir).await?;
     match cmd {
-        ToolsCmd::List => print_tools(&exec.list_tools(&ToolListFilter::default())?),
+        ToolsCmd::List => {
+            let body = daemon::get_json(&origin, "/api/tools").await?;
+            print_tool_rows(&body);
+        }
         ToolsCmd::Search { query } => {
-            let tools = exec.list_tools(&ToolListFilter {
-                query: Some(query),
-                ..ToolListFilter::default()
-            })?;
-            if tools.is_empty() {
+            let q = urlencoding_query(&query);
+            let body = daemon::get_json(&origin, &format!("/api/tools?q={q}")).await?;
+            if body
+                .get("tools")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty)
+            {
                 println!("(no matching tools)");
             } else {
-                print_tools(&tools);
+                print_tool_rows(&body);
             }
         }
         ToolsCmd::Integrations => {
-            let rows = exec.list_integrations()?;
+            let body = daemon::get_json(&origin, "/api/integrations").await?;
+            let rows = body
+                .get("integrations")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             if rows.is_empty() {
                 println!("(no integrations)");
             } else {
                 for i in rows {
-                    println!("{}\t{}\t{}", i.slug, i.kind, i.name);
+                    println!(
+                        "{}\t{}\t{}",
+                        i.get("slug").and_then(Value::as_str).unwrap_or(""),
+                        i.get("kind").and_then(Value::as_str).unwrap_or(""),
+                        i.get("name").and_then(Value::as_str).unwrap_or("")
+                    );
                 }
             }
         }
         ToolsCmd::Describe { path } => {
             let joined = path.join(".");
-            let tool = exec.describe(&joined)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "path": tool.cli_path(),
-                    "address": tool.address.to_string(),
-                    "description": tool.description,
-                    "inputSchema": tool.input_schema,
-                }))?
-            );
+            let q = urlencoding_query(&joined);
+            let body = daemon::get_json(&origin, &format!("/api/tools?q={q}")).await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
         }
     }
     Ok(())
 }
 
-fn print_tools(tools: &[executor_core::Tool]) {
+fn print_tool_rows(body: &Value) {
+    let Some(tools) = body.get("tools").and_then(Value::as_array) else {
+        return;
+    };
     for t in tools {
-        println!("{}\t{}", t.cli_path(), t.description);
+        println!(
+            "{}\t{}",
+            t.get("path").and_then(Value::as_str).unwrap_or(""),
+            t.get("description").and_then(Value::as_str).unwrap_or("")
+        );
     }
+}
+
+fn urlencoding_query(value: &str) -> String {
+    let mut out = String::new();
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(char::from(b));
+            }
+            _ => {
+                out.push('%');
+                out.push(hex_digit(b >> 4));
+                out.push(hex_digit(b & 0x0f));
+            }
+        }
+    }
+    out
+}
+
+fn hex_digit(n: u8) -> char {
+    char::from(if n < 10 { b'0' + n } else { b'A' + (n - 10) })
 }
 
 fn bind_addr(port: u16) -> SocketAddr {
@@ -427,6 +471,15 @@ async fn daemon_run(
     write_pid(&pid_path)?;
     let ctrlc_task = ctrlc(cancel.clone());
     tracing::info!(%bind, "executor daemon listening");
+    let pointer = daemon::DaemonPointer {
+        origin: format!("http://127.0.0.1:{}", bind.port()),
+        pid: std::process::id(),
+    };
+    let _ = std::fs::create_dir_all(data_dir(dir));
+    let _ = std::fs::write(
+        daemon::pointer_path(dir),
+        serde_json::to_vec_pretty(&pointer).unwrap_or_default(),
+    );
     let result = serve(
         HostConfig {
             bind,
@@ -444,22 +497,15 @@ async fn daemon_run(
 }
 
 fn daemon_status(dir: Option<&Path>) {
-    let pid_path = data_dir(dir).join("daemon.pid");
+    let data = data_dir(dir);
+    if let Ok(text) = std::fs::read_to_string(daemon::pointer_path(Some(&data))) {
+        println!("{text}");
+        return;
+    }
+    let pid_path = data.join("daemon.pid");
     match std::fs::read_to_string(&pid_path) {
         Ok(s) => println!("pid {} ({})", s.trim(), pid_path.display()),
         Err(_) => println!("daemon is not running"),
-    }
-}
-
-fn daemon_stop(dir: Option<&Path>) {
-    let pid_path = data_dir(dir).join("daemon.pid");
-    if let Ok(s) = std::fs::read_to_string(&pid_path) {
-        if let Ok(pid) = s.trim().parse::<i32>() {
-            let _ = std::process::Command::new("kill")
-                .arg(pid.to_string())
-                .status();
-        }
-        let _ = std::fs::remove_file(pid_path);
     }
 }
 
@@ -655,7 +701,7 @@ fn cmd_server(
 }
 
 fn cmd_open(no_open: bool) {
-    let url = format!("http://127.0.0.1:{DEFAULT_PORT}/health");
+    let url = format!("http://127.0.0.1:{DEFAULT_PORT}/api/health");
     println!("{url}");
     if !no_open {
         login::try_open(&url);

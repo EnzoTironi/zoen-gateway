@@ -8,6 +8,7 @@ mod edge;
 mod http;
 mod mcp;
 mod sentry;
+mod skills;
 mod well_known;
 
 use std::net::SocketAddr;
@@ -21,7 +22,10 @@ use tokio_util::sync::CancellationToken;
 pub use auth::HostAuth;
 pub use edge::worker_path_allowed;
 pub use http::app;
-pub use mcp::{handle_jsonrpc, stdio_loop};
+pub use mcp::{
+    ElicitationMode, McpHub, McpMode, McpOptions, SharedMcpHub, as_sse, handle_jsonrpc,
+    handle_jsonrpc_with, sse_ping, stdio_loop, stdio_loop_with,
+};
 pub use sentry::{SentryDsn, attach as attach_sentry, attach_dsn as attach_sentry_dsn};
 pub use well_known::authorization_server_metadata;
 
@@ -52,6 +56,8 @@ pub struct AppState {
     pub metrics: Option<Arc<AtomicMetrics>>,
     /// Device-login / OAuth tables.
     pub auth: Arc<HostAuth>,
+    /// Streamable HTTP MCP sessions.
+    pub mcp: Arc<McpHub>,
 }
 
 impl AppState {
@@ -62,6 +68,7 @@ impl AppState {
             executor,
             metrics,
             auth: Arc::new(HostAuth::new()),
+            mcp: Arc::new(McpHub::new()),
         }
     }
 }

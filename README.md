@@ -54,7 +54,7 @@ executor call tools.pets.org.work.pets.listPets '{}' --yes
 executor call --code 'return await tools.search({"query":"pets"});' --yes
 EXECUTOR_KERNEL=js executor call --code 'return 1 + 2;' --yes
 executor serve --port 4788
-executor mcp          # attach-bridge to :4788/mcp when healthy, else in-process
+executor mcp          # auto-starts the daemon, then stdio-bridges to /mcp
 executor login --no-poll
 executor server add cloud --origin https://example.test --default
 ```
@@ -64,8 +64,11 @@ Daemon HTTP (loopback by default; `EXECUTOR_BIND=0.0.0.0` for containers):
 | Path | Purpose |
 |---|---|
 | `GET /health` | liveness + loaded plugins |
+| `GET /api/health` | original CLI probe; body `ok` |
 | `GET /metrics` | atomic counters |
-| `POST /mcp` | MCP JSON-RPC |
+| `POST /mcp` | Streamable HTTP MCP (`execute` / `skills` / `resume`) |
+| `POST /mcp/toolkits/:slug` | toolkit-scoped MCP |
+| `POST /executions` | `{ "code", "autoApprove" }` (also `/api/executions`) |
 | `POST /api/execute` | `{ "path", "args", "auto_approve", "idempotency_key" }` |
 | `POST /api/execute-code` | `{ "source", "auto_approve" }` |
 | `GET /api/tools` | catalog page |
@@ -97,4 +100,4 @@ executor-test-support   starts/attaches to `npx emulate` for integration tests
 
 ## Not ported
 
-Web console, desktop shell, marketing site, `executor web`, OAuth browser chrome, QuickJS/Deno/workerd. Cloudflare is a fetch proxy (`workers/proxy.js`), not the original UI+D1+WASM worker. `open` / `docs` print URLs only.
+Web console, desktop shell, marketing site, `executor web`, OAuth browser chrome, Deno/workerd kernels. One in-process QuickJS (`rquickjs`) is the code-mode guest. Cloudflare is a fetch proxy (`workers/proxy.js`), not the original UI+D1+WASM worker. `open` / `docs` print URLs only.

@@ -283,6 +283,32 @@ impl Outcome {
             }),
         }
     }
+
+    /// Original HTTP `POST /executions` wire body.
+    #[must_use]
+    pub fn execution_api(&self) -> Value {
+        match self {
+            Self::Completed {
+                result,
+                execution_id,
+            } => {
+                let structured = result.envelope();
+                serde_json::json!({
+                    "status": "completed",
+                    "text": structured.to_string(),
+                    "structured": structured,
+                    "isError": matches!(result, ToolResult::Err { .. }),
+                    "executionId": execution_id.as_str(),
+                })
+            }
+            Self::Paused { execution } => serde_json::json!({
+                "status": "paused",
+                "text": format!("paused: {}", execution.id),
+                "structured": execution,
+                "executionId": execution.id.as_str(),
+            }),
+        }
+    }
 }
 
 /// Caller-supplied key so retried executes reuse the first outcome.

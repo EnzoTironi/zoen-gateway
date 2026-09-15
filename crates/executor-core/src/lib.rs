@@ -15,6 +15,7 @@ mod execution;
 mod id;
 mod integration;
 mod json_schema;
+mod json_ts;
 mod limits;
 mod metrics;
 mod owner;
@@ -23,9 +24,11 @@ mod plugin;
 mod policy;
 mod position;
 mod scope;
+mod search;
 mod secret;
 mod store;
 mod tool;
+mod toolkit;
 mod www_authenticate;
 
 pub use address::{
@@ -55,6 +58,7 @@ pub use integration::{
     RegisterIntegration,
 };
 pub use json_schema::{SchemaError, validate_against};
+pub use json_ts::json_schema_to_typescript;
 pub use limits::Limits;
 pub use metrics::{AtomicMetrics, Metrics, MetricsSnapshot, NoopMetrics, names as metric_names};
 pub use owner::Owner;
@@ -75,7 +79,9 @@ pub use position::generate_key_between;
 pub use scope::{
     InsufficientScope, OAUTH_SCOPE_INSUFFICIENT, detect_insufficient_scope, tool_error_from_http,
 };
+pub use search::{SearchArgs, SearchPage, SearchableTool, ToolDiscovery, search_tools};
 pub use secret::{SecretRef, strip_secret_refs};
 pub use store::{BlobStore, CatalogStore, MemoryCatalog};
 pub use tool::{Tool, ToolAnnotations, ToolDef, ToolListFilter};
+pub use toolkit::{KV_OAUTH_CLIENTS, KV_OAUTH_SESSIONS, KV_TOOLKITS, Toolkit, ToolkitPolicy};
 pub use www_authenticate::{AuthChallenge, parse_challenges};
