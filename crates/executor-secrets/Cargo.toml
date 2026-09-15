@@ -10,6 +10,10 @@ description = "SecretRef resolvers: memory, env, file, and a default writable st
 [dependencies]
 executor-core.workspace = true
 parking_lot.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -4,8 +4,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use executor_core::{ExecutorError, ProviderItemId, ProviderKey, SecretRef};
+use executor_core::{ExecutorError, ProviderItemId, ProviderKey, SecretRef, StorageError};
 use parking_lot::RwLock;
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 static ITEM_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -81,6 +84,76 @@ impl SecretResolver for MemorySecrets {
     }
 }
 
+impl MemorySecrets {
+    fn load_map(&self, items: BTreeMap<String, String>) {
+        let max = items
+            .keys()
+            .filter_map(|k| k.strip_prefix("sec_")?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        ITEM_SEQ.fetch_max(max.saturating_add(1), Ordering::Relaxed);
+        *self.items.write() = items;
+    }
+
+    fn dump_map(&self) -> BTreeMap<String, String> {
+        self.items.read().clone()
+    }
+}
+
+/// Default store persisted as owner-only JSON next to the catalog.
+pub struct FileSecrets {
+    path: std::path::PathBuf,
+    inner: MemorySecrets,
+}
+
+impl FileSecrets {
+    /// Load `path` if it exists; otherwise start empty.
+    ///
+    /// # Errors
+    ///
+    /// Unreadable or illegal JSON.
+    pub fn open(path: impl Into<std::path::PathBuf>) -> Result<Self, ExecutorError> {
+        let path = path.into();
+        let inner = MemorySecrets::new();
+        if path.is_file() {
+            let text = fs::read_to_string(&path).map_err(StorageError::new)?;
+            let map: BTreeMap<String, String> =
+                serde_json::from_str(&text).map_err(StorageError::new)?;
+            inner.load_map(map);
+        }
+        Ok(Self { path, inner })
+    }
+
+    fn persist(&self) -> Result<(), ExecutorError> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).map_err(StorageError::new)?;
+        }
+        let tmp = self.path.with_extension("json.tmp");
+        let bytes = serde_json::to_vec(&self.inner.dump_map()).map_err(StorageError::new)?;
+        fs::write(&tmp, bytes).map_err(StorageError::new)?;
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&tmp).map_err(StorageError::new)?.permissions();
+            perms.set_mode(0o600);
+            fs::set_permissions(&tmp, perms).map_err(StorageError::new)?;
+        }
+        fs::rename(&tmp, &self.path).map_err(StorageError::new)?;
+        Ok(())
+    }
+}
+
+impl SecretResolver for FileSecrets {
+    fn resolve(&self, secret: &SecretRef) -> Result<String, ExecutorError> {
+        self.inner.resolve(secret)
+    }
+
+    fn store_default(&self, value: &str) -> Result<SecretRef, ExecutorError> {
+        let stored = self.inner.store_default(value)?;
+        self.persist()?;
+        Ok(stored)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{MemorySecrets, SecretResolver};
@@ -102,5 +175,16 @@ mod tests {
             })
             .unwrap();
         assert!(!value.is_empty());
+    }
+
+    #[test]
+    fn file_store_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.json");
+        let first = super::FileSecrets::open(&path).unwrap();
+        let r = first.store_default("disk-secret").unwrap();
+        drop(first);
+        let second = super::FileSecrets::open(&path).unwrap();
+        assert_eq!(second.resolve(&r).unwrap(), "disk-secret");
     }
 }

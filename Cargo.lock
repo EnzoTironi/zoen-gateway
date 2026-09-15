@@ -442,6 +442,8 @@ version = "0.1.0"
 dependencies = [
  "executor-core",
  "parking_lot",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
