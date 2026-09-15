@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use executor_core::{
     AuthKind, AuthMethod, Detection, DetectionConfidence, HealthCheckCtx, HealthVerdict,
     IntegrationConfig, IntegrationPlugin, InvokeCtx, PluginError, PluginId, ResolveToolsCtx,
-    ResolvedTools, ToolDef, ToolError, ToolName, ToolResult,
+    ResolvedTools, ToolDef, ToolError, ToolName, ToolResult, tool_error_from_http,
 };
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -178,18 +178,41 @@ async fn call_tool(
     args: &Value,
     timeout: Duration,
 ) -> Result<ToolResult, PluginError> {
-    match rpc(
-        client,
-        config,
-        values,
-        template,
-        methods,
-        "tools/call",
-        &json!({"name": name, "arguments": args}),
-        timeout,
-    )
-    .await
-    {
+    let transport = config
+        .get("transport")
+        .and_then(Value::as_str)
+        .unwrap_or("http");
+    let stdio = transport == "stdio" || (config.get("command").is_some() && transport != "http");
+    let result = if stdio {
+        stdio_rpc(
+            config,
+            values,
+            "tools/call",
+            &json!({"name": name, "arguments": args}),
+            timeout,
+        )
+        .await
+        .map_err(|e| ToolError {
+            code: "mcp_error".into(),
+            message: e.0,
+            status: None,
+            details: None,
+            retryable: Some(true),
+        })
+    } else {
+        http_rpc(
+            client,
+            config,
+            values,
+            template,
+            methods,
+            "tools/call",
+            &json!({"name": name, "arguments": args}),
+            timeout,
+        )
+        .await
+    };
+    match result {
         Ok(result) => {
             if result
                 .get("isError")
@@ -207,13 +230,7 @@ async fn call_tool(
                 Ok(ToolResult::ok(result))
             }
         }
-        Err(e) => Ok(ToolResult::fail(ToolError {
-            code: "mcp_error".into(),
-            message: e.0,
-            status: None,
-            details: None,
-            retryable: Some(true),
-        })),
+        Err(error) => Ok(ToolResult::fail(error)),
     }
 }
 
@@ -240,6 +257,7 @@ async fn rpc(
         client, config, values, template, methods, method, params, timeout,
     )
     .await
+    .map_err(|e| PluginError::new(e.message))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -252,11 +270,17 @@ async fn http_rpc(
     method: &str,
     params: &Value,
     timeout: Duration,
-) -> Result<Value, PluginError> {
+) -> Result<Value, ToolError> {
     let url = config
         .get("url")
         .and_then(Value::as_str)
-        .ok_or_else(|| PluginError::new("MCP http transport requires url"))?;
+        .ok_or_else(|| ToolError {
+            code: "mcp_error".into(),
+            message: "MCP http transport requires url".into(),
+            status: None,
+            details: None,
+            retryable: Some(false),
+        })?;
     let body = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -288,22 +312,39 @@ async fn http_rpc(
             req = req.header(&p.name, format!("{}{v}", p.prefix));
         }
     }
-    let response = req
-        .send()
-        .await
-        .map_err(|e| PluginError::new(format!("mcp http: {e}")))?;
-    if !response.status().is_success() {
-        return Err(PluginError::new(format!(
-            "mcp http: HTTP {}",
-            response.status()
-        )));
+    let response = req.send().await.map_err(|e| ToolError {
+        code: "mcp_error".into(),
+        message: format!("mcp http: {e}"),
+        status: None,
+        details: None,
+        retryable: Some(true),
+    })?;
+    let status = response.status();
+    let header_pairs: Vec<(String, String)> = response
+        .headers()
+        .iter()
+        .filter_map(|(k, v)| Some((k.as_str().to_owned(), v.to_str().ok()?.to_owned())))
+        .collect();
+    let bytes = response.bytes().await.map_err(|e| ToolError {
+        code: "mcp_error".into(),
+        message: format!("mcp http body: {e}"),
+        status: None,
+        details: None,
+        retryable: Some(true),
+    })?;
+    let rpc: Value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(&bytes) }));
+    if !status.is_success() {
+        return Err(tool_error_from_http(status.as_u16(), &header_pairs, &rpc));
     }
-    let rpc: Value = response
-        .json()
-        .await
-        .map_err(|e| PluginError::new(format!("mcp http body: {e}")))?;
     if let Some(err) = rpc.get("error") {
-        return Err(PluginError::new(err.to_string()));
+        return Err(ToolError {
+            code: "mcp_error".into(),
+            message: err.to_string(),
+            status: None,
+            details: Some(err.clone()),
+            retryable: Some(false),
+        });
     }
     Ok(rpc.get("result").cloned().unwrap_or(Value::Null))
 }

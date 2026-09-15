@@ -15,7 +15,7 @@ use reqwest::Client;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-fn http() -> Client {
+pub fn http() -> Client {
     static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -247,6 +247,12 @@ pub async fn prepare(
     }
     if values.get("token").is_some_and(|t| !t.is_empty()) {
         return Ok(None);
+    }
+    match crate::ema::try_fill_token(&method, values, timeout).await {
+        Ok(true) => return Ok(None),
+        Ok(false) => {}
+        Err(err) if err.may_fallback() => {}
+        Err(err) => return Err(ExecutorError::EnterpriseManaged(err)),
     }
     let token_url = method
         .token_url

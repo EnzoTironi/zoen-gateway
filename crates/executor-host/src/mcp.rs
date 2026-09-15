@@ -92,6 +92,9 @@ const fn jsonrpc_code(err: &executor_core::ExecutorError) -> i64 {
         executor_core::ExecutorError::Cancelled => -32002,
         executor_core::ExecutorError::ToolNotFound { .. } => -32601,
         executor_core::ExecutorError::InvalidArgs(_) => -32602,
+        executor_core::ExecutorError::EnterpriseManaged(
+            executor_core::EmaError::SubjectTokenRejected { .. },
+        ) => -32004,
         _ => -32003,
     }
 }

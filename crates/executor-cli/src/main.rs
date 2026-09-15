@@ -412,12 +412,14 @@ async fn daemon_run(
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let metrics = Arc::new(executor_core::AtomicMetrics::new());
+    let (sink, sentry) =
+        executor_host::attach_sentry(Arc::clone(&metrics) as Arc<dyn executor_core::Metrics>);
     let exec = create_executor_with_metrics(
         CreateOptions {
             data_dir: dir.map(Path::to_path_buf),
             ..CreateOptions::default()
         },
-        Arc::clone(&metrics) as Arc<dyn executor_core::Metrics>,
+        sink,
     )?;
     let cancel = exec.cancellation_token();
     let bind = bind_addr(port);
@@ -437,6 +439,7 @@ async fn daemon_run(
     let _ = std::fs::remove_file(pid_path);
     drop(ctrlc_task);
     result?;
+    drop(sentry);
     Ok(())
 }
 

@@ -4,8 +4,11 @@
 #![allow(clippy::result_large_err)]
 
 mod auth;
+mod edge;
 mod http;
 mod mcp;
+mod sentry;
+mod well_known;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -16,8 +19,11 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 pub use auth::HostAuth;
+pub use edge::worker_path_allowed;
 pub use http::app;
 pub use mcp::{handle_jsonrpc, stdio_loop};
+pub use sentry::{SentryDsn, attach as attach_sentry, attach_dsn as attach_sentry_dsn};
+pub use well_known::authorization_server_metadata;
 
 /// Bind address and resource bounds for the daemon.
 #[derive(Clone, Debug)]

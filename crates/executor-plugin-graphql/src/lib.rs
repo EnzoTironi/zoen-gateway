@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use executor_core::{
     AuthKind, AuthMethod, Detection, DetectionConfidence, HealthCheckCtx, HealthVerdict,
     IntegrationConfig, IntegrationPlugin, InvokeCtx, PluginError, PluginId, ResolveToolsCtx,
-    ResolvedTools, ToolError, ToolResult,
+    ResolvedTools, ToolError, ToolResult, tool_error_from_http,
 };
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -150,18 +150,23 @@ impl IntegrationPlugin for GraphqlPlugin {
             .await
             .map_err(|e| PluginError::new(format!("graphql: {e}")))?;
         let status = response.status();
-        let body: Value = response
-            .json()
+        let header_pairs: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .filter_map(|(k, v)| Some((k.as_str().to_owned(), v.to_str().ok()?.to_owned())))
+            .collect();
+        let bytes = response
+            .bytes()
             .await
             .map_err(|e| PluginError::new(format!("graphql body: {e}")))?;
+        let body = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(&bytes) }));
         if !status.is_success() {
-            return Ok(ToolResult::fail(ToolError {
-                code: "http_error".into(),
-                message: format!("HTTP {status}"),
-                status: Some(status.as_u16()),
-                details: Some(body),
-                retryable: Some(status.is_server_error()),
-            }));
+            return Ok(ToolResult::fail(tool_error_from_http(
+                status.as_u16(),
+                &header_pairs,
+                &body,
+            )));
         }
         if let Some(errors) = body.get("errors") {
             return Ok(ToolResult::fail(ToolError {

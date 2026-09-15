@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use executor_core::{
-    AuthKind, AuthPlacement, Carrier, PluginError, ToolError, ToolHttpMeta, ToolResult,
+    AuthKind, AuthPlacement, Carrier, PluginError, ToolHttpMeta, ToolResult, tool_error_from_http,
 };
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -81,13 +81,11 @@ pub async fn invoke_operation(
         .map_err(|e| PluginError::new(format!("body: {e}")))?;
     let data = decode_body(&bytes);
     if status.is_client_error() || status.is_server_error() {
-        return Ok(ToolResult::fail(ToolError {
-            code: "http_error".into(),
-            message: format!("HTTP {status}"),
-            status: Some(status.as_u16()),
-            details: Some(data),
-            retryable: Some(status.is_server_error()),
-        }));
+        return Ok(ToolResult::fail(tool_error_from_http(
+            status.as_u16(),
+            &header_pairs,
+            &data,
+        )));
     }
     Ok(ToolResult::ok_http(
         data,
@@ -464,5 +462,39 @@ mod tests {
             "{raw}"
         );
         assert!(matches!(result, ToolResult::Ok { .. }), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn insufficient_scope_is_classified() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0_u8; 2048];
+            let _ = sock.read(&mut buf).await.unwrap();
+            sock.write_all(
+                b"HTTP/1.1 403 Forbidden\r\nWWW-Authenticate: Bearer error=\"insufficient_scope\", scope=\"files.read\"\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+            )
+            .await
+            .unwrap();
+        });
+        let result = invoke_operation(
+            &Client::new(),
+            &format!("http://{addr}"),
+            &json!({"method": "get", "path": "/drive", "parameters": []}),
+            &json!({}),
+            reqwest::header::HeaderMap::new(),
+            &[],
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        match result {
+            ToolResult::Err { error } => {
+                assert_eq!(error.code, "oauth_scope_insufficient");
+            }
+            ToolResult::Ok { .. } => panic!("expected oauth_scope_insufficient"),
+        }
     }
 }

@@ -65,7 +65,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/execute-code", post(execute_code))
 }
 
-fn origin_of(headers: &HeaderMap) -> String {
+pub fn origin_of(headers: &HeaderMap) -> String {
     let host = headers
         .get("host")
         .and_then(|v| v.to_str().ok())
@@ -363,6 +363,7 @@ mod tests {
         assert!(tokens["access_token"].as_str().is_some(), "{tokens}");
 
         let res = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -377,5 +378,20 @@ mod tests {
         let out = json_body(res).await;
         assert_eq!(out["status"], "completed");
         assert_eq!(out["result"]["data"], 1);
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/oauth-authorization-server")
+                    .header("host", "127.0.0.1:4788")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let meta = json_body(res).await;
+        assert_eq!(meta["issuer"], "http://127.0.0.1:4788");
+        assert!(meta.get("authorization_grant_profiles_supported").is_none());
     }
 }

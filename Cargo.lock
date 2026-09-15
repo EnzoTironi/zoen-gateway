@@ -466,8 +466,10 @@ dependencies = [
  "axum",
  "executor-core",
  "executor-engine",
+ "getrandom 0.2.17",
  "http-body-util",
  "parking_lot",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
@@ -475,6 +477,8 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "url",
+ "wiremock",
 ]
 
 [[package]]

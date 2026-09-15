@@ -4,7 +4,7 @@ use std::fmt::Display;
 
 use thiserror::Error;
 
-use crate::{IntegrationSlug, ToolAddress};
+use crate::{EmaError, IntegrationSlug, ToolAddress};
 
 /// An identifier failed to parse.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -137,6 +137,9 @@ pub enum ExecutorError {
     /// Code-mode parse or runtime failure.
     #[error("code-mode: {0}")]
     Code(String),
+    /// Enterprise-managed authorization (ID-JAG) failed.
+    #[error(transparent)]
+    EnterpriseManaged(EmaError),
 }
 
 impl ExecutorError {

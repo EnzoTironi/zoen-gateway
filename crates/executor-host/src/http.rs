@@ -35,6 +35,7 @@ pub fn app(state: AppState, limits: &Limits) -> Router {
         .route("/api/tools", get(api_tools))
         .route("/api/integrations", get(api_integrations))
         .merge(crate::auth::routes())
+        .merge(crate::well_known::routes())
         .layer(DefaultBodyLimit::max(body))
         .layer(
             ServiceBuilder::new()
@@ -205,6 +206,15 @@ fn map_outcome(result: Result<Outcome, ExecutorError>) -> axum::response::Respon
                 | ExecutorError::InvalidPattern(_)
                 | ExecutorError::InvalidId(_)
                 | ExecutorError::Code(_) => StatusCode::BAD_REQUEST,
+                ExecutorError::EnterpriseManaged(inner) => match inner {
+                    executor_core::EmaError::PolicyDenied { .. } => StatusCode::FORBIDDEN,
+                    executor_core::EmaError::SubjectTokenRejected { .. } => {
+                        StatusCode::UNAUTHORIZED
+                    }
+                    executor_core::EmaError::UpstreamUnavailable { .. }
+                    | executor_core::EmaError::GrantProfileUnsupported { .. }
+                    | executor_core::EmaError::RedemptionRejected { .. } => StatusCode::BAD_GATEWAY,
+                },
                 _ => StatusCode::BAD_GATEWAY,
             };
             err_status(status, err.to_string())

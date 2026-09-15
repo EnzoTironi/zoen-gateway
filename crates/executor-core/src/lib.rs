@@ -9,6 +9,7 @@
 mod address;
 mod auth;
 mod connection;
+mod ema;
 mod error;
 mod execution;
 mod id;
@@ -21,9 +22,11 @@ mod path;
 mod plugin;
 mod policy;
 mod position;
+mod scope;
 mod secret;
 mod store;
 mod tool;
+mod www_authenticate;
 
 pub use address::{
     ConnectionAddress, ParsedToolAddress, ToolAddress, connection_address, parse_tool_address,
@@ -32,6 +35,11 @@ pub use address::{
 pub use auth::{AuthKind, AuthMethod, AuthPlacement, AuthTemplateSlug, Carrier, NO_AUTH_TEMPLATE};
 pub use connection::{
     Connection, ConnectionInput, ConnectionRef, CredentialMap, HealthVerdict, IdentityLabel,
+};
+pub use ema::{
+    DEFAULT_SUBJECT_TOKEN_TYPE, ENTERPRISE_MANAGED_PROVIDER_STATE_KEY, EmaError, EmaStep,
+    ID_JAG_GRANT_PROFILE, ID_JAG_TOKEN_TYPE, ID_JAG_TOKEN_TYPE_SENTINEL, JWT_BEARER_GRANT_TYPE,
+    TOKEN_EXCHANGE_GRANT_TYPE, supports_id_jag_grant_profile,
 };
 pub use error::{ExecutorError, InvalidId, StorageError};
 pub use execution::{
@@ -64,6 +72,10 @@ pub use policy::{
     match_pattern, pattern_specificity, position_for_new_pattern, resolve_tool_policy,
 };
 pub use position::generate_key_between;
+pub use scope::{
+    InsufficientScope, OAUTH_SCOPE_INSUFFICIENT, detect_insufficient_scope, tool_error_from_http,
+};
 pub use secret::{SecretRef, strip_secret_refs};
 pub use store::{BlobStore, CatalogStore, MemoryCatalog};
 pub use tool::{Tool, ToolAnnotations, ToolDef, ToolListFilter};
+pub use www_authenticate::{AuthChallenge, parse_challenges};

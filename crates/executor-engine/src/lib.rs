@@ -9,6 +9,7 @@
 
 mod catalog;
 mod code;
+mod ema;
 mod execute;
 mod lookup;
 mod oauth;
@@ -28,6 +29,11 @@ use parking_lot::RwLock;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
+pub use ema::{
+    AuthorizationServerMetadata, EmaMintInput, EnterpriseManagedGrant,
+    discover_authorization_server_metadata, mint_enterprise_managed_access_token,
+    resource_metadata_urls, run_enterprise_managed_authorization, try_fill_token,
+};
 pub use oauth::{
     DcrClient, authorization_request, client_credentials, exchange_code, pkce_pair, register_client,
 };

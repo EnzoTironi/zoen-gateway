@@ -13,6 +13,8 @@ The floor is a single verb — `execute(path, args)` — plus the catalog that m
 - Run bounded code-mode scripts (`return await tools["path"](args)`) without QuickJS
 - Device-login (`login` / `logout` / `whoami`) and named server profiles
 - Encrypt the default secret store at rest (`EXS1` ChaCha20-Poly1305 box)
+- Enterprise-managed MCP authorization (ID-JAG) when the Resource AS advertises the profile
+- Optional Sentry envelopes (`SENTRY_DSN`); Cloudflare fetch-proxy Worker (`wrangler.toml`)
 
 ## Production bar
 
@@ -67,6 +69,8 @@ Daemon HTTP (loopback by default; `EXECUTOR_BIND=0.0.0.0` for containers):
 | `GET /api/auth/cli-login` | RFC 8628 discovery |
 | `POST /api/oauth/register` | RFC 7591 DCR proxy |
 | `GET /api/oauth/callback` | authorization-code landing (prints JSON; no chrome) |
+| `GET /.well-known/oauth-protected-resource` | RFC 9728 |
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 (does **not** advertise ID-JAG) |
 
 Default data dir: `EXECUTOR_DATA_DIR` or `~/.executor`. Catalog and secrets file mode `0600`. Secret key: `EXECUTOR_SECRET_KEY` or `secret.key`.
 
@@ -90,4 +94,4 @@ executor-test-support   starts/attaches to `npx emulate` for integration tests
 
 ## Not ported
 
-Web console, desktop shell, marketing site, `executor web`, OAuth browser chrome, QuickJS/Deno/workerd, Cloudflare Worker, Sentry exporter. `open` / `docs` print URLs only.
+Web console, desktop shell, marketing site, `executor web`, OAuth browser chrome, QuickJS/Deno/workerd. Cloudflare is a fetch proxy (`workers/proxy.js`), not the original UI+D1+WASM worker. `open` / `docs` print URLs only.
