@@ -31,7 +31,12 @@ fn help_and_empty_integrations() {
     assert!(stdout.contains("call"), "{stdout}");
     assert!(stdout.contains("login"), "{stdout}");
     assert!(stdout.contains("server"), "{stdout}");
-    assert!(!stdout.to_ascii_lowercase().contains("web ui"));
+    assert!(
+        !stdout
+            .lines()
+            .any(|line| line.trim_start().starts_with("web ")),
+        "web subcommand must stay unported: {stdout}"
+    );
     let (code, stdout, stderr) = run(dir.path(), &["tools", "integrations"]);
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("(no integrations)"), "{stdout}");

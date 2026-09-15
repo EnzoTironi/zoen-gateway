@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 #[command(
     name = "executor",
     version,
-    about = "Integration catalog for agents (no UI)"
+    about = "Integration catalog for agents (CLI only)"
 )]
 struct Cli {
     /// Catalog directory (overrides `EXECUTOR_DATA_DIR`).
@@ -116,7 +116,7 @@ enum Commands {
         #[command(subcommand)]
         cmd: ServiceCmd,
     },
-    /// Print the local daemon URL (no web UI).
+    /// Print the loopback daemon health URL.
     Open {
         #[arg(long)]
         no_open: bool,
