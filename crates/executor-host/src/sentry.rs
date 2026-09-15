@@ -41,7 +41,7 @@ impl SentryDsn {
         }
         let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
         Some(Self {
-            envelope_url: format!("{}//{host}{port}/api/{project}/envelope/", url.scheme()),
+            envelope_url: format!("{}://{host}{port}/api/{project}/envelope/", url.scheme()),
             public_key: public_key.to_owned(),
         })
     }
