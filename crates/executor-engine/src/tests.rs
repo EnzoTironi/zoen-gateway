@@ -386,3 +386,30 @@ async fn code_mode_compiles_and_calls() {
         other => panic!("{other:?}"),
     }
 }
+
+#[tokio::test]
+async fn code_mode_js_control_flow() {
+    let exec = wired(Arc::new(EchoPlugin), Limits::production(), "echo").await;
+    let src = r"
+        const ping = await tools.echo.org.work.ping({ n: 4 });
+        if (ping.n !== 4) throw new Error('bad ping');
+        return { doubled: ping.n * 2 };
+    ";
+    let out = exec
+        .run_code(
+            src,
+            ExecuteOptions {
+                auto_approve: true,
+                ..ExecuteOptions::default()
+            },
+        )
+        .await
+        .expect("quickjs");
+    match out {
+        Outcome::Completed {
+            result: ToolResult::Ok { data, .. },
+            ..
+        } => assert_eq!(data["doubled"], 8, "{data}"),
+        other => panic!("{other:?}"),
+    }
+}

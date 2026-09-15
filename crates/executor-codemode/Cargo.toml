@@ -5,13 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Bounded code-mode kernel: a safe subset of tools.path(args) scripts."
+description = "Bounded code-mode kernel: native tools.path(args) subset plus in-process QuickJS."
 
 [dependencies]
 async-trait.workspace = true
 executor-core.workspace = true
+rquickjs = { version = "0.13.0", features = ["futures", "parallel"] }
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

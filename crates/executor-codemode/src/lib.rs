@@ -1,8 +1,12 @@
-//! Bounded code-mode kernel. Not `QuickJS`: a safe-Rust subset of
-//! `return await tools["path"](args)` / `tools.search({query})`.
+//! Bounded code-mode kernel.
 //!
-//! Caps (`Limits.max_code_bytes`, `max_tool_calls`, eval steps) keep a noisy
-//! script from unbounded work. Each tool call still goes through `execute`.
+//! Fast path: a safe-Rust subset of `return await tools["path"](args)`.
+//! Real JS: in-process `QuickJS` (`rquickjs`), the same engine executor local
+//! uses via `makeQuickJsExecutor`. `EXECUTOR_KERNEL=js` forces `QuickJS`;
+//! `native` disables it. There is no Deno / Node / workerd guest.
+//!
+//! Caps: `Limits.max_code_bytes`, `max_tool_calls`, native eval steps, `QuickJS`
+//! memory (64 MiB), stack (1 MiB), and interrupt timeout (paused during tools).
 
 #![allow(clippy::module_name_repetitions)]
 
@@ -10,6 +14,8 @@ mod ast;
 mod eval;
 mod lex;
 mod parse;
+mod quickjs;
+mod recover;
 
 use async_trait::async_trait;
 use executor_core::{ExecutorError, Limits, Outcome};
@@ -19,6 +25,8 @@ use thiserror::Error;
 pub use ast::{Expr, Stmt};
 pub use eval::run;
 pub use parse::parse;
+pub use quickjs::KernelPreference;
+pub use recover::recover_execution_body;
 
 /// Compile a single catalog call into the subset grammar.
 #[must_use]
@@ -54,13 +62,30 @@ pub trait CodeHost: Send + Sync {
 
 /// Parse `source` and evaluate it against `host`.
 ///
+/// Uses [`KernelPreference::from_env`] (`EXECUTOR_KERNEL`).
+///
 /// # Errors
 ///
-/// Oversize source, parse errors, eval / tool-call limits, host failures.
+/// Oversize source, parse errors, eval / tool-call limits, host failures,
+/// `QuickJS` timeout / memory, or an unknown `EXECUTOR_KERNEL`.
 pub async fn execute(
     source: &str,
     host: &dyn CodeHost,
     limits: &Limits,
+) -> Result<Outcome, CodeError> {
+    execute_with(source, host, limits, KernelPreference::from_env()?).await
+}
+
+/// [`execute`] with an explicit kernel preference.
+///
+/// # Errors
+///
+/// Same as [`execute`].
+pub async fn execute_with(
+    source: &str,
+    host: &dyn CodeHost,
+    limits: &Limits,
+    preference: KernelPreference,
 ) -> Result<Outcome, CodeError> {
     if source.len() > limits.max_code_bytes {
         return Err(CodeError::new(format!(
@@ -69,6 +94,25 @@ pub async fn execute(
             limits.max_code_bytes
         )));
     }
+    let body = recover_execution_body(source);
+    if body.len() > limits.max_code_bytes {
+        return Err(CodeError::new(format!(
+            "source is {} bytes (max {})",
+            body.len(),
+            limits.max_code_bytes
+        )));
+    }
+    match preference {
+        KernelPreference::Js => quickjs::run(source, host, limits).await,
+        KernelPreference::Native => native(&body, host, limits).await,
+        KernelPreference::Auto => match parse(&body) {
+            Ok(program) => run(program, host, limits).await,
+            Err(_) => quickjs::run(source, host, limits).await,
+        },
+    }
+}
+
+async fn native(source: &str, host: &dyn CodeHost, limits: &Limits) -> Result<Outcome, CodeError> {
     let program = parse(source)?;
     run(program, host, limits).await
 }

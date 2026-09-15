@@ -247,6 +247,33 @@ async fn github_code_mode_get_user() {
 }
 
 #[tokio::test]
+async fn github_js_isolate_get_user() {
+    let exec = in_memory(Limits::production());
+    add_github(&exec).await;
+    let path = find_tool(&exec, "github", "getauthenticated");
+    let src = format!(
+        r#"
+            const path = {path};
+            const user = await tools[path]({{}});
+            if (!user || !user.login) throw new Error("missing login");
+            return {{ login: user.login, via: "isolate" }};
+        "#,
+        path = serde_json::to_string(&path).expect("path json")
+    );
+    let out = exec.run_code(&src, yes()).await.expect("quickjs");
+    match out {
+        Outcome::Completed {
+            result: ToolResult::Ok { data, .. },
+            ..
+        } => {
+            assert_eq!(data["login"], "octocat", "{data}");
+            assert_eq!(data["via"], "isolate", "{data}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn google_calendar_discovery_lists_events() {
     let emulate = urls();
     let discovery_url = format!("{}/discovery/v1/apis/calendar/v3/rest", emulate.google);

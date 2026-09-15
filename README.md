@@ -10,7 +10,7 @@ The floor is a single verb — `execute(path, args)` — plus the catalog that m
 - Bind connections (credentials live behind `SecretRef`; agents never see values)
 - Gate tools with org-outer policy (`approve` / `require_approval` / `block`)
 - Call tools from the CLI, an in-process SDK, a loopback HTTP daemon, or MCP stdio
-- Run bounded code-mode scripts (`return await tools["path"](args)`) without QuickJS
+- Run bounded code-mode scripts (`return await tools["path"](args)` natively, or real JS in in-process QuickJS)
 - Device-login (`login` / `logout` / `whoami`) and named server profiles
 - Encrypt the default secret store at rest (`EXS1` ChaCha20-Poly1305 box)
 - Enterprise-managed MCP authorization (ID-JAG) when the Resource AS advertises the profile
@@ -18,7 +18,9 @@ The floor is a single verb — `execute(path, args)` — plus the catalog that m
 
 ## Production bar
 
-The runtime is built as if it will serve more than one million people: bounded in-flight executes (fail-fast overload, no unbounded queue), deadlines, cancellation, WAL SQLite with a connection pool, `spawn_blocking` on the disk path, idempotent retries, structured errors, and `tracing` + `Metrics` instead of `println`. Specs cap at 64 MiB; code-mode caps at 64 KiB source and 32 tool calls.
+The runtime is built as if it will serve more than one million people: bounded in-flight executes (fail-fast overload, no unbounded queue), deadlines, cancellation, WAL SQLite with a connection pool, `spawn_blocking` on the disk path, idempotent retries, structured errors, and `tracing` + `Metrics` instead of `println`. Specs cap at 64 MiB; code-mode caps at 64 KiB source and 32 tool calls. QuickJS is capped at 64 MiB memory and 1 MiB stack; compute timeout pauses while tools run.
+
+`EXECUTOR_KERNEL` selects the code-mode runtime: unset/`auto` (native subset, then QuickJS), `native`, or `js` (always QuickJS).
 
 ## Build
 
@@ -50,6 +52,7 @@ executor tools integrations
 executor call executor.openapi.addSpec '{"slug":"pets","spec":"{...}"}' --yes
 executor call tools.pets.org.work.pets.listPets '{}' --yes
 executor call --code 'return await tools.search({"query":"pets"});' --yes
+EXECUTOR_KERNEL=js executor call --code 'return 1 + 2;' --yes
 executor serve --port 4788
 executor mcp          # attach-bridge to :4788/mcp when healthy, else in-process
 executor login --no-poll

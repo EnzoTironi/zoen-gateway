@@ -96,6 +96,22 @@ fn call_github_via_cli() {
 }
 
 #[test]
+fn call_js_isolate_via_cli() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let out = Command::new(bin())
+        .env("EXECUTOR_DATA_DIR", dir.path())
+        .env("EXECUTOR_KERNEL", "js")
+        .args(["call", "--yes", "--code", "return 1 + 2;"])
+        .output()
+        .expect("spawn executor");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code().unwrap_or(1), 0, "{stdout}{stderr}");
+    let parsed: Value = serde_json::from_str(&stdout).unwrap_or_else(|_| json!({}));
+    assert_eq!(parsed.pointer("/result/data"), Some(&json!(3)), "{stdout}");
+}
+
+#[test]
 fn server_profiles_and_whoami() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let (code, stdout, stderr) = run(
