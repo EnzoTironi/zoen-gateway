@@ -120,10 +120,15 @@ pub fn spec_base_url(doc: &Value) -> Option<String> {
 
 /// Tool defs plus `plugin_meta` bindings.
 ///
+/// `spec_base` is the document API root (`servers[0].url` or Discovery `rootUrl`+`basePath`).
+///
 /// # Errors
 ///
 /// Illegal tool names (should not happen).
-pub fn tools_from_operations(ops: &[Operation]) -> Result<Vec<ToolDef>, PluginError> {
+pub fn tools_from_operations(
+    ops: &[Operation],
+    spec_base: Option<&str>,
+) -> Result<Vec<ToolDef>, PluginError> {
     let planned = plan_tool_paths(ops);
     let mut defs = Vec::with_capacity(planned.len());
     for (path, op) in planned {
@@ -158,7 +163,7 @@ pub fn tools_from_operations(ops: &[Operation]) -> Result<Vec<ToolDef>, PluginEr
         if !required.is_empty() {
             schema["required"] = json!(required);
         }
-        let meta = json!({
+        let mut meta = json!({
             "method": op.method,
             "path": op.path,
             "parameters": op.parameters.iter().map(|p| json!({
@@ -167,6 +172,9 @@ pub fn tools_from_operations(ops: &[Operation]) -> Result<Vec<ToolDef>, PluginEr
                 "required": p.required,
             })).collect::<Vec<_>>(),
         });
+        if let Some(base) = spec_base {
+            meta["baseUrl"] = json!(base.trim_end_matches('/'));
+        }
         defs.push(ToolDef {
             name: ToolName::new(&path).map_err(PluginError::new)?,
             description: op.summary.clone(),
@@ -467,7 +475,7 @@ mod tests {
         }"#;
         let doc = parse_spec(spec).unwrap();
         let ops = extract_operations(&doc).unwrap();
-        let tools = tools_from_operations(&ops).unwrap();
+        let tools = tools_from_operations(&ops, None).unwrap();
         let names: Vec<_> = tools.iter().map(|t| t.name.as_str().to_owned()).collect();
         assert!(names.iter().any(|n| n.starts_with("pets.")), "{names:?}");
     }

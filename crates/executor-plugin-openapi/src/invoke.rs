@@ -243,9 +243,6 @@ fn apply_body(
         .iter()
         .filter_map(|p| p.get("name").and_then(Value::as_str))
         .collect();
-    if let Some(body) = args.get("body") {
-        return builder.json(body);
-    }
     let Some(obj) = args.as_object() else {
         return builder;
     };
@@ -257,10 +254,16 @@ fn apply_body(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     if leftover.is_empty() {
-        builder
-    } else {
-        builder.json(&Value::Object(leftover))
+        return builder;
     }
+    // A string `body` field is a property (GitHub issues), not the HTTP entity.
+    if leftover.len() == 1
+        && let Some(inner) = leftover.get("body")
+        && inner.is_object()
+    {
+        return builder.json(inner);
+    }
+    builder.json(&Value::Object(leftover))
 }
 
 fn arg_value(args: &Value, name: &str, container: &str) -> Option<Value> {
@@ -292,6 +295,36 @@ fn join_url(base: &str, path: &str) -> String {
     } else {
         format!("{base}/{path}")
     }
+}
+
+/// Combine a catalog `baseUrl` (often an origin override for emulate) with the spec root.
+pub fn effective_base(config_base: Option<&str>, spec_base: Option<&str>) -> String {
+    match (
+        config_base.map(|s| s.trim_end_matches('/')),
+        spec_base.map(|s| s.trim_end_matches('/')),
+    ) {
+        (None, None) => "http://127.0.0.1".into(),
+        (Some(one), None) | (None, Some(one)) => one.to_owned(),
+        (Some(config), Some(spec)) => {
+            if origin_only(config) && !origin_only(spec) {
+                format!("{config}{}", url_path(spec))
+            } else {
+                config.to_owned()
+            }
+        }
+    }
+}
+
+fn origin_only(url: &str) -> bool {
+    url_path(url).is_empty()
+}
+
+fn url_path(url: &str) -> &str {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .unwrap_or(url);
+    rest.find('/').map_or("", |i| &rest[i..])
 }
 
 fn decode_body(bytes: &[u8]) -> Value {
@@ -362,6 +395,73 @@ mod tests {
             !raw.to_ascii_lowercase()
                 .contains("content-type: application/json"),
             "GET must not send a JSON body; request was:\n{raw}"
+        );
+        assert!(matches!(result, ToolResult::Ok { .. }), "{result:?}");
+    }
+
+    #[test]
+    fn origin_override_keeps_spec_path() {
+        assert_eq!(
+            super::effective_base(
+                Some("http://127.0.0.1:18401"),
+                Some("http://localhost:18401/calendar/v3/"),
+            ),
+            "http://127.0.0.1:18401/calendar/v3"
+        );
+        assert_eq!(
+            super::effective_base(
+                Some("http://127.0.0.1:18400"),
+                Some("http://127.0.0.1:18400"),
+            ),
+            "http://127.0.0.1:18400"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_json_includes_string_body_field() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0_u8; 4096];
+            let n = sock.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+            sock.write_all(
+                b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+            )
+            .await
+            .unwrap();
+            req
+        });
+        let result = invoke_operation(
+            &Client::new(),
+            &format!("http://{addr}"),
+            &json!({
+                "method": "post",
+                "path": "/repos/{owner}/{repo}/issues",
+                "parameters": [
+                    {"name": "owner", "in": "path", "required": true},
+                    {"name": "repo", "in": "path", "required": true}
+                ]
+            }),
+            &json!({
+                "owner": "octocat",
+                "repo": "hello-world",
+                "title": "executor e2e",
+                "body": "opened via the Rust port"
+            }),
+            reqwest::header::HeaderMap::new(),
+            &[],
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let raw = server.await.unwrap();
+        assert!(raw.starts_with("POST "), "{raw}");
+        assert!(raw.contains(r#""title":"executor e2e""#), "{raw}");
+        assert!(
+            raw.contains(r#""body":"opened via the Rust port""#),
+            "{raw}"
         );
         assert!(matches!(result, ToolResult::Ok { .. }), "{result:?}");
     }

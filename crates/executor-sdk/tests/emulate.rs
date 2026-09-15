@@ -8,7 +8,7 @@ use executor_core::{
 use executor_engine::Executor;
 use executor_host::{AppState, HostConfig, serve};
 use executor_sdk::{CreateOptions, create_executor};
-use executor_test_support::{GITHUB_TOKEN, LINEAR_TOKEN, github_openapi_spec, urls};
+use executor_test_support::{GITHUB_TOKEN, GOOGLE_TOKEN, LINEAR_TOKEN, github_openapi_spec, urls};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -264,39 +264,33 @@ async fn google_calendar_discovery_lists_events() {
     .expect("add calendar spec");
     exec.execute(
         "executor.coreTools.connections.create",
-        json!({"integration": "gcal", "name": "work", "template": "none"}),
+        json!({"integration": "gcal", "name": "work", "template": AuthTemplateSlug::bearer().as_str(), "values": { "token": GOOGLE_TOKEN }}),
         yes(),
     )
     .await
     .expect("gcal connection");
     let path = find_tool(&exec, "gcal", "calendarlist");
     let out = exec
-        .execute(&path, json!({"calendarId": "primary"}), yes())
+        .execute(&path, json!({"userId": "me"}), yes())
+        .await
+        .expect("list calendars");
+    let data = completed_data(out);
+    let text = data.to_string();
+    assert!(
+        text.contains("primary") || text.contains("Kickoff") || text.contains("calendarList"),
+        "{data}"
+    );
+    let events_path = find_tool(&exec, "gcal", "eventslist");
+    let listed = exec
+        .execute(&events_path, json!({"calendarId": "primary"}), yes())
         .await
         .expect("list events");
-    match out {
-        Outcome::Completed {
-            result: ToolResult::Ok { data, .. },
-            ..
-        } => {
-            let text = data.to_string();
-            assert!(
-                text.contains("Kickoff") || text.contains("items") || text.contains("kind"),
-                "{data}"
-            );
-        }
-        Outcome::Completed {
-            result: ToolResult::Err { error },
-            ..
-        } => {
-            // Some discovery methods need extra path params; listing still proves extract+invoke.
-            assert!(
-                error.status.is_some() || !error.message.is_empty(),
-                "{error:?}"
-            );
-        }
-        Outcome::Paused { .. } => panic!("unexpected pause"),
-    }
+    let data = completed_data(listed);
+    let text = data.to_string();
+    assert!(
+        text.contains("Kickoff") || text.contains("items") || text.contains("kind"),
+        "{data}"
+    );
 }
 
 #[tokio::test]

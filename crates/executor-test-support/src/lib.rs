@@ -15,6 +15,8 @@ use serde_json::{Value, json};
 
 /// GitHub REST emulator.
 pub const GITHUB_TOKEN: &str = "gh_test";
+/// Google emulator bearer token (seeded users accept any Bearer).
+pub const GOOGLE_TOKEN: &str = "test-token";
 /// Linear GraphQL emulator personal API key.
 pub const LINEAR_TOKEN: &str = "lin_test_admin";
 

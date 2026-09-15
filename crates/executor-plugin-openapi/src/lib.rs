@@ -99,7 +99,7 @@ impl IntegrationPlugin for OpenApiPlugin {
                 ctx.max_tools
             )));
         }
-        let tools = tools_from_operations(&ops)?;
+        let tools = tools_from_operations(&ops, spec_base_url(&doc).as_deref())?;
         Ok(ResolvedTools {
             tools,
             definitions: None,
@@ -115,9 +115,7 @@ impl IntegrationPlugin for OpenApiPlugin {
             .plugin_meta
             .as_ref()
             .ok_or_else(|| PluginError::new("missing plugin_meta"))?;
-        let base = ctx
-            .integration
-            .config
+        let spec_base = meta
             .get("baseUrl")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned)
@@ -127,8 +125,13 @@ impl IntegrationPlugin for OpenApiPlugin {
                     .get("spec")
                     .and_then(Value::as_str)
                     .and_then(|t| parse_spec(t).ok().and_then(|d| spec_base_url(&d)))
-            })
-            .unwrap_or_else(|| "http://127.0.0.1".into());
+            });
+        let config_base = ctx
+            .integration
+            .config
+            .get("baseUrl")
+            .and_then(Value::as_str);
+        let base = invoke::effective_base(config_base, spec_base.as_deref());
         let (kind, placements) = bound_auth(
             &ctx.integration.integration.auth_methods,
             ctx.template.as_str(),
