@@ -1,0 +1,20 @@
+[package]
+name = "executor-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Pooled SQLite catalog for Executor (WAL, busy timeout, indexed addresses)."
+
+[dependencies]
+executor-core.workspace = true
+parking_lot.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

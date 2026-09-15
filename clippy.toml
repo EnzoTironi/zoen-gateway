@@ -1,0 +1,5 @@
+# Pedantic is denied from the workspace Cargo.toml. This file only tunes
+# thresholds so the domain model is not forced into artificial splits.
+too-many-arguments-threshold = 8
+too-many-lines-threshold = 100
+cognitive-complexity-threshold = 30

@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+.executor/
+.executor-dev/
+*.db
+*.db-journal
+.idea/
+.vscode/
+agent-tools/

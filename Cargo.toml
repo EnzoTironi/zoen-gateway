@@ -1,0 +1,75 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+publish = false
+repository = "https://github.com/UsefulSoftwareCo/executor"
+
+[workspace.dependencies]
+async-trait = "0.1.83"
+axum = { version = "0.8.1", features = ["json"] }
+base64 = "0.22.1"
+bytes = "1.9.0"
+chacha20poly1305 = "0.10.1"
+clap = { version = "4.5.23", features = ["derive", "env"] }
+getrandom = "0.2.15"
+hex = "0.4.3"
+http-body-util = "0.1.2"
+parking_lot = "0.12.3"
+percent-encoding = "2.3.1"
+reqwest = { version = "0.12.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.135"
+serde_yaml = "0.9.34"
+sha2 = "0.10.8"
+tempfile = "3.14.0"
+thiserror = "2.0.11"
+tokio = { version = "1.43.0", features = [
+    "fs",
+    "io-std",
+    "io-util",
+    "macros",
+    "net",
+    "process",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+tower-http = { version = "0.6.2", features = ["trace"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+url = { version = "2.5.4", features = ["serde"] }
+wiremock = "0.6.2"
+tokio-util = { version = "0.7.13", features = ["rt"] }
+tower = { version = "0.5.2", features = ["limit", "timeout", "util"] }
+
+executor-codemode = { path = "crates/executor-codemode" }
+executor-core = { path = "crates/executor-core" }
+executor-engine = { path = "crates/executor-engine" }
+executor-host = { path = "crates/executor-host" }
+executor-plugin-graphql = { path = "crates/executor-plugin-graphql" }
+executor-plugin-mcp = { path = "crates/executor-plugin-mcp" }
+executor-plugin-openapi = { path = "crates/executor-plugin-openapi" }
+executor-sdk = { path = "crates/executor-sdk" }
+executor-secrets = { path = "crates/executor-secrets" }
+executor-storage = { path = "crates/executor-storage" }
+
+[workspace.lints.rust]
+missing_docs = "deny"
+rust_2018_idioms = "deny"
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+# `expect_used` / `panic` stay deny in library crates; tests use `unwrap` via
+# the standard `#[cfg(test)]` exception, not a workspace allow.
