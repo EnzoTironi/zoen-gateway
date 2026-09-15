@@ -63,7 +63,7 @@ pub fn strip_typescript(source: &str) -> Result<String, CodeError> {
                 continue;
             }
         }
-        if chars[i] == ':' && !starts_with(&chars, i, "::") {
+        if chars[i] == ':' && !starts_with(&chars, i, "::") && !is_object_prop_colon(&chars, i) {
             let prev = prev_code(&chars, i);
             if prev.is_some_and(|c| {
                 c == ')' || c.is_ascii_alphanumeric() || c == '_' || c == '?' || c == ']'
@@ -80,6 +80,36 @@ pub fn strip_typescript(source: &str) -> Result<String, CodeError> {
         i += 1;
     }
     Ok(out)
+}
+
+const fn is_object_prop_colon(chars: &[char], colon: usize) -> bool {
+    let mut i = colon;
+    while i > 0 && chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    if i == 0 {
+        return false;
+    }
+    i -= 1;
+    if chars[i] == '"' || chars[i] == '\'' {
+        let quote = chars[i];
+        while i > 0 {
+            i -= 1;
+            if chars[i] == quote {
+                break;
+            }
+        }
+    } else if is_ident(chars[i]) {
+        while i > 0 && is_ident(chars[i - 1]) {
+            i -= 1;
+        }
+    } else {
+        return false;
+    }
+    while i > 0 && chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    i > 0 && matches!(chars[i - 1], '{' | ',')
 }
 
 fn looks_like_bare_assignment(source: &str) -> bool {
@@ -375,6 +405,13 @@ mod tests {
     fn removes_type_aliases() {
         let out = strip_typescript("type Foo = string; const x = 'a'; return x;").unwrap();
         assert!(!out.contains("type Foo"));
+    }
+
+    #[test]
+    fn preserves_object_literal_values() {
+        let out = strip_typescript("return { n: 4, doubled: ping.n * 2 };").unwrap();
+        assert!(out.contains("n: 4"), "{out}");
+        assert!(out.contains("ping.n * 2"), "{out}");
     }
 
     #[test]
