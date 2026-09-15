@@ -1,0 +1,15 @@
+[package]
+name = "executor-secrets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "SecretRef resolvers: memory, env, file, and a default writable store."
+
+[dependencies]
+executor-core.workspace = true
+parking_lot.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,32 @@
+[package]
+name = "executor-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "executor CLI: call, tools, resume, mcp, daemon (no web UI)."
+
+[[bin]]
+name = "executor"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+executor-core.workspace = true
+executor-engine.workspace = true
+executor-host.workspace = true
+executor-sdk.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+executor-test-support = { path = "../executor-test-support" }
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "cursor/**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  rust:
+    name: fmt · clippy pedantic · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy pedantic
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
+      - name: emulate (GitHub, Google, Linear)
+        run: |
+          npx --yes emulate@0.11.2 --service github,google,linear --seed emulate.config.yaml --port 18400 &
+          for i in $(seq 1 90); do
+            if curl -sf http://127.0.0.1:18400/users/octocat >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "emulate did not become ready"
+          exit 1
+      - name: test
+        env:
+          GITHUB_EMULATOR_URL: http://127.0.0.1:18400
+          GOOGLE_EMULATOR_URL: http://127.0.0.1:18401
+          LINEAR_EMULATOR_URL: http://127.0.0.1:18402
+        run: cargo test --workspace --all-features

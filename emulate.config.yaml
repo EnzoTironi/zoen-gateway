@@ -1,0 +1,95 @@
+# Seed data for `npx emulate` (https://github.com/vercel-labs/emulate).
+# Used by CI and by `cargo test` when the emulator is not already running.
+# Not a vendored copy of emulate — the CLI is the tool.
+
+tokens:
+  gh_test:
+    login: octocat
+    scopes: [repo, user]
+
+github:
+  users:
+    - login: octocat
+      name: The Octocat
+      email: octocat@github.com
+  orgs:
+    - login: acme
+      name: Acme
+      members:
+        - login: octocat
+          role: admin
+  repos:
+    - owner: octocat
+      name: hello-world
+      description: Seeded repository for executor e2e
+      language: Rust
+      topics: [executor, emulate]
+      auto_init: true
+    - owner: acme
+      name: catalog
+      description: Org repo
+      language: TypeScript
+      auto_init: true
+
+google:
+  users:
+    - email: testuser@example.com
+      name: Test User
+      email_verified: true
+  calendars:
+    - id: primary
+      user_email: testuser@example.com
+      summary: testuser@example.com
+      primary: true
+      selected: true
+      time_zone: UTC
+  calendar_events:
+    - id: evt_kickoff
+      user_email: testuser@example.com
+      calendar_id: primary
+      summary: Project Kickoff
+      start_date_time: "2025-01-10T09:00:00.000Z"
+      end_date_time: "2025-01-10T09:30:00.000Z"
+  messages:
+    - id: msg_welcome
+      user_email: testuser@example.com
+      from: welcome@example.com
+      to: testuser@example.com
+      subject: Welcome
+      body_text: Seeded Gmail message.
+      label_ids: [INBOX]
+      date: "2025-01-04T10:00:00.000Z"
+
+linear:
+  organization:
+    name: Acme
+    url_key: acme
+  users:
+    - email: admin@example.com
+      name: Admin User
+      admin: true
+    - email: dev@example.com
+      name: Developer
+  teams:
+    - key: ENG
+      name: Engineering
+      states:
+        - name: Backlog
+          type: backlog
+        - name: Todo
+          type: unstarted
+        - name: In Progress
+          type: started
+        - name: Done
+          type: completed
+  issues:
+    - team: ENG
+      title: Fix local checkout test
+      description: Reproduce and fix the checkout failure.
+      state: Todo
+      assignee: dev@example.com
+  tokens:
+    - token: lin_test_admin
+      user: admin@example.com
+      scopes: [read, write, issues:create, comments:create, admin]
+  strict_scopes: false

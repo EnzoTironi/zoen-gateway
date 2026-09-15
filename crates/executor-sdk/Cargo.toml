@@ -1,0 +1,30 @@
+[package]
+name = "executor-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "In-process wiring: plugins, catalog, secrets, Executor handle."
+
+[dependencies]
+executor-core.workspace = true
+executor-engine.workspace = true
+executor-plugin-graphql.workspace = true
+executor-plugin-mcp.workspace = true
+executor-plugin-openapi.workspace = true
+executor-secrets.workspace = true
+executor-storage.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio.workspace = true
+wiremock.workspace = true
+executor-host.workspace = true
+executor-test-support = { path = "../executor-test-support" }
+reqwest.workspace = true
+tokio-util.workspace = true
+
+[lints]
+workspace = true

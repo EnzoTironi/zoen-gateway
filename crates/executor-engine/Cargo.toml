@@ -1,0 +1,25 @@
+[package]
+name = "executor-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Executor runtime: catalog, policy, bounded execute, pause/resume."
+
+[dependencies]
+async-trait.workspace = true
+executor-core.workspace = true
+executor-secrets.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
