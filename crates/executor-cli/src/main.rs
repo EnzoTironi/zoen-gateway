@@ -2,10 +2,12 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+mod call_help;
 mod daemon;
 mod login;
 mod mcp_bridge;
 mod profiles;
+mod service;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -13,8 +15,14 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use executor_core::{compile_call, resolve_invocation, unix_now_ms};
-use executor_host::{AppState, DEFAULT_PORT, DEFAULT_SERVICE_PORT, HostConfig, serve};
-use executor_sdk::{CreateOptions, create_executor_with_metrics, data_dir};
+use executor_host::{
+    AppState, DEFAULT_PORT, DEFAULT_SERVICE_PORT, HostConfig, default_allowed_hosts,
+    load_or_mint_auth_with, serve,
+};
+use executor_sdk::{
+    CreateOptions, apply_config, create_executor_with_metrics, data_dir, load_jsonc,
+};
+use executor_storage::DataDirLock;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -36,9 +44,19 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Invoke a tool, or run a code-mode script with `--code`.
+    #[command(disable_help_flag = true)]
     Call {
         /// Path segments and optional trailing JSON / `@file.json`.
         path: Vec<String>,
+        /// Namespace browse (`executor call --help github`).
+        #[arg(short = 'h', long = "help")]
+        show_help: bool,
+        /// Substring filter for `--help` children.
+        #[arg(long = "match")]
+        match_query: Option<String>,
+        /// Max children to print with `--help`.
+        #[arg(long)]
+        limit: Option<usize>,
         /// Bounded code-mode source (`return await tools["path"]({})`).
         #[arg(long)]
         code: Option<String>,
@@ -60,6 +78,9 @@ enum Commands {
         /// JSON content for form elicitations.
         #[arg(long)]
         content: Option<String>,
+        /// Persist-choice: `session` or `always`.
+        #[arg(long)]
+        persist: Option<String>,
     },
     /// Tool catalog.
     Tools {
@@ -88,8 +109,12 @@ enum Commands {
         #[command(subcommand)]
         cmd: DaemonCmd,
     },
-    /// Write a systemd user unit (Linux).
-    Install,
+    /// Write an OS service unit (systemd --user / launchd / schtasks).
+    Install {
+        /// Best-effort boot-before-login (linger / ONSTART).
+        #[arg(long)]
+        boot: bool,
+    },
     /// Remove the systemd user unit.
     Uninstall,
     /// RFC 8628 device login (prints a verification URL).
@@ -153,12 +178,21 @@ enum ToolsCmd {
 
 #[derive(Subcommand, Debug)]
 enum DaemonCmd {
-    /// Run the daemon (foreground; writes a pid file).
+    /// Run the daemon (detached unless `--foreground`).
     Run {
         #[arg(long, default_value_t = DEFAULT_PORT)]
         port: u16,
         #[arg(long)]
         foreground: bool,
+        /// Bind hostname (`127.0.0.1`, `0.0.0.0`, `localhost`).
+        #[arg(long, default_value = "127.0.0.1")]
+        hostname: String,
+        /// Extra CORS origins (repeatable).
+        #[arg(long = "allowed-host")]
+        allowed_host: Vec<String>,
+        /// Override the minted `auth.json` bearer.
+        #[arg(long)]
+        auth_token: Option<String>,
     },
     /// Print pid/status.
     Status,
@@ -196,7 +230,10 @@ enum ServerCmd {
 #[derive(Subcommand, Debug)]
 enum ServiceCmd {
     /// Alias of `install`.
-    Install,
+    Install {
+        #[arg(long)]
+        boot: bool,
+    },
     /// Alias of `uninstall`.
     Uninstall,
     /// Alias of `daemon status`.
@@ -224,20 +261,40 @@ async fn main() {
     }
 }
 
+#[allow(clippy::too_many_lines)] // clap dispatch
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = cli.data_dir.clone();
     match cli.command {
         Commands::Call {
             path,
+            show_help,
+            match_query,
+            limit,
             code,
             yes,
             idempotency_key,
-        } => cmd_call(dir.as_deref(), path, code, yes, idempotency_key).await,
+        } => {
+            if show_help {
+                let origin = daemon::ensure_daemon(dir.as_deref()).await?;
+                let token = daemon::bearer_token(dir.as_deref());
+                call_help::run(
+                    &origin,
+                    token.as_deref(),
+                    &path,
+                    match_query.as_deref(),
+                    limit,
+                )
+                .await
+            } else {
+                cmd_call(dir.as_deref(), path, code, yes, idempotency_key).await
+            }
+        }
         Commands::Resume {
             execution_id,
             action,
             content,
-        } => cmd_resume(dir.as_deref(), execution_id, action, content).await,
+            persist,
+        } => cmd_resume(dir.as_deref(), execution_id, action, content, persist).await,
         Commands::Tools { cmd } => cmd_tools(dir.as_deref(), cmd).await,
         Commands::Mcp {
             mode,
@@ -245,23 +302,34 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             search_tools,
         } => {
             let origin = daemon::ensure_daemon(dir.as_deref()).await?;
+            let token = daemon::bearer_token(dir.as_deref());
             let mut q = format!("?mode={mode}&elicitation_mode={elicitation_mode}");
             if search_tools {
                 q.push_str("&search_tools=true");
             }
-            mcp_bridge::run(&origin, &q).await?;
+            mcp_bridge::run(&origin, &q, token.as_deref()).await?;
             Ok(())
         }
-        Commands::Serve { port } => daemon_run(dir.as_deref(), port).await,
+        Commands::Serve { port } => {
+            daemon_run(DaemonRun {
+                dir: dir.as_deref(),
+                port,
+                foreground: true,
+                hostname: "127.0.0.1".into(),
+                allowed_hosts: Vec::new(),
+                auth_token: None,
+            })
+            .await
+        }
         Commands::Daemon { cmd } => daemon_cmd(dir.as_deref(), cmd).await,
-        Commands::Install
+        Commands::Install { boot }
         | Commands::Service {
-            cmd: ServiceCmd::Install,
-        } => install(dir.as_deref()),
+            cmd: ServiceCmd::Install { boot },
+        } => service::install(dir.as_deref(), boot),
         Commands::Uninstall
         | Commands::Service {
             cmd: ServiceCmd::Uninstall,
-        } => uninstall(),
+        } => service::uninstall(),
         Commands::Service {
             cmd: ServiceCmd::Status,
         } => {
@@ -272,7 +340,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             cmd: ServiceCmd::Restart { port },
         } => {
             daemon::stop(dir.as_deref());
-            daemon_run(dir.as_deref(), port).await
+            daemon_run(DaemonRun {
+                dir: dir.as_deref(),
+                port,
+                foreground: true,
+                hostname: "127.0.0.1".into(),
+                allowed_hosts: Vec::new(),
+                auth_token: None,
+            })
+            .await
         }
         Commands::Login {
             server,
@@ -299,7 +375,23 @@ async fn daemon_cmd(
     cmd: DaemonCmd,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match cmd {
-        DaemonCmd::Run { port, .. } => daemon_run(dir, port).await,
+        DaemonCmd::Run {
+            port,
+            foreground,
+            hostname,
+            allowed_host,
+            auth_token,
+        } => {
+            daemon_run(DaemonRun {
+                dir,
+                port,
+                foreground,
+                hostname,
+                allowed_hosts: allowed_host,
+                auth_token,
+            })
+            .await
+        }
         DaemonCmd::Status => {
             daemon_status(dir);
             Ok(())
@@ -310,7 +402,15 @@ async fn daemon_cmd(
         }
         DaemonCmd::Restart { port } => {
             daemon::stop(dir);
-            daemon_run(dir, port).await
+            daemon_run(DaemonRun {
+                dir,
+                port,
+                foreground: true,
+                hostname: "127.0.0.1".into(),
+                allowed_hosts: Vec::new(),
+                auth_token: None,
+            })
+            .await
         }
     }
 }
@@ -323,6 +423,7 @@ async fn cmd_call(
     idempotency_key: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
     let source = if let Some(code) = code {
         code
     } else {
@@ -336,7 +437,7 @@ async fn cmd_call(
     if let Some(key) = idempotency_key {
         body["idempotencyKey"] = json!(key);
     }
-    let outcome = daemon::post_json(&origin, "/executions", &body).await?;
+    let outcome = daemon::post_json(&origin, "/executions", &body, token.as_deref()).await?;
     println!("{}", serde_json::to_string_pretty(&outcome)?);
     Ok(())
 }
@@ -346,14 +447,19 @@ async fn cmd_resume(
     execution_id: String,
     action: String,
     content: Option<String>,
+    persist: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
     let mut body = json!({ "action": action });
     if let Some(raw) = content {
         body["content"] = serde_json::from_str(&raw).unwrap_or(Value::String(raw));
     }
+    if let Some(persist) = persist {
+        body["persist"] = json!(persist);
+    }
     let path = format!("/executions/{execution_id}/resume");
-    let outcome = daemon::post_json(&origin, &path, &body).await?;
+    let outcome = daemon::post_json(&origin, &path, &body, token.as_deref()).await?;
     println!("{}", serde_json::to_string_pretty(&outcome)?);
     Ok(())
 }
@@ -363,14 +469,16 @@ async fn cmd_tools(
     cmd: ToolsCmd,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
     match cmd {
         ToolsCmd::List => {
-            let body = daemon::get_json(&origin, "/api/tools").await?;
+            let body = daemon::get_json(&origin, "/api/tools", token.as_deref()).await?;
             print_tool_rows(&body);
         }
         ToolsCmd::Search { query } => {
             let q = urlencoding_query(&query);
-            let body = daemon::get_json(&origin, &format!("/api/tools?q={q}")).await?;
+            let body =
+                daemon::get_json(&origin, &format!("/api/tools?q={q}"), token.as_deref()).await?;
             if body
                 .get("tools")
                 .and_then(Value::as_array)
@@ -382,7 +490,7 @@ async fn cmd_tools(
             }
         }
         ToolsCmd::Integrations => {
-            let body = daemon::get_json(&origin, "/api/integrations").await?;
+            let body = daemon::get_json(&origin, "/api/integrations", token.as_deref()).await?;
             let rows = body
                 .get("integrations")
                 .and_then(Value::as_array)
@@ -404,7 +512,8 @@ async fn cmd_tools(
         ToolsCmd::Describe { path } => {
             let joined = path.join(".");
             let q = urlencoding_query(&joined);
-            let body = daemon::get_json(&origin, &format!("/api/tools?q={q}")).await?;
+            let body =
+                daemon::get_json(&origin, &format!("/api/tools?q={q}"), token.as_deref()).await?;
             println!("{}", serde_json::to_string_pretty(&body)?);
         }
     }
@@ -424,7 +533,7 @@ fn print_tool_rows(body: &Value) {
     }
 }
 
-fn urlencoding_query(value: &str) -> String {
+pub(crate) fn urlencoding_query(value: &str) -> String {
     let mut out = String::new();
     for b in value.bytes() {
         match b {
@@ -445,47 +554,95 @@ fn hex_digit(n: u8) -> char {
     char::from(if n < 10 { b'0' + n } else { b'A' + (n - 10) })
 }
 
-fn bind_addr(port: u16) -> SocketAddr {
-    let host = std::env::var("EXECUTOR_BIND").unwrap_or_else(|_| "127.0.0.1".into());
-    let ip: IpAddr = host.parse().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+fn bind_addr(hostname: &str, port: u16) -> SocketAddr {
+    let host = std::env::var("EXECUTOR_BIND").unwrap_or_else(|_| hostname.to_owned());
+    if host.eq_ignore_ascii_case("localhost") {
+        return SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), port));
+    }
+    let ip: IpAddr = host.parse().unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     SocketAddr::from((ip, port))
 }
 
-async fn daemon_run(
-    dir: Option<&Path>,
+struct DaemonRun<'a> {
+    dir: Option<&'a Path>,
     port: u16,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    foreground: bool,
+    hostname: String,
+    allowed_hosts: Vec<String>,
+    auth_token: Option<String>,
+}
+
+async fn daemon_run(opts: DaemonRun<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let data = data_dir(opts.dir);
+    let origin_host = if opts.hostname == "0.0.0.0" || opts.hostname == "::" {
+        "127.0.0.1"
+    } else {
+        opts.hostname.as_str()
+    };
+    let origin = format!("http://{origin_host}:{}", opts.port);
+    if !opts.foreground {
+        if daemon::is_healthy(&origin).await {
+            println!("{origin}");
+            return Ok(());
+        }
+        daemon::spawn_daemon(&data, opts.port, &opts.hostname, &opts.allowed_hosts)?;
+        for _ in 0..80 {
+            if daemon::is_healthy(&origin).await {
+                println!("{origin}");
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        return Err(format!("daemon did not become healthy at {origin}").into());
+    }
+    let ownership = DataDirLock::acquire(&data)?;
+    let token = load_or_mint_auth_with(&data, opts.auth_token.as_deref())?;
+    let mut allowed = default_allowed_hosts();
+    allowed.push(opts.hostname.clone());
+    allowed.extend(opts.allowed_hosts.iter().cloned());
+    if opts.hostname == "0.0.0.0" || opts.hostname == "::" {
+        allowed.push("*".into());
+    }
+    allowed.sort();
+    allowed.dedup();
     let metrics = Arc::new(executor_core::AtomicMetrics::new());
     let (sink, sentry) =
         executor_host::attach_sentry(Arc::clone(&metrics) as Arc<dyn executor_core::Metrics>);
     let exec = create_executor_with_metrics(
         CreateOptions {
-            data_dir: dir.map(Path::to_path_buf),
+            data_dir: Some(data.clone()),
             ..CreateOptions::default()
         },
         sink,
     )?;
+    if let Some((path, cfg)) = load_jsonc(Some(&data)) {
+        tracing::info!(path = %path.display(), "applying executor.jsonc");
+        apply_config(&exec, &cfg).await?;
+    }
     let cancel = exec.cancellation_token();
-    let bind = bind_addr(port);
-    let pid_path = data_dir(dir).join("daemon.pid");
+    let bind = bind_addr(&opts.hostname, opts.port);
+    let pid_path = data.join("daemon.pid");
     write_pid(&pid_path)?;
     let ctrlc_task = ctrlc(cancel.clone());
     tracing::info!(%bind, "executor daemon listening");
     let pointer = daemon::DaemonPointer {
-        origin: format!("http://127.0.0.1:{}", bind.port()),
+        origin: origin.clone(),
         pid: std::process::id(),
     };
-    let _ = std::fs::create_dir_all(data_dir(dir));
+    let _ = std::fs::create_dir_all(&data);
     let _ = std::fs::write(
-        daemon::pointer_path(dir),
+        daemon::pointer_path(Some(&data)),
         serde_json::to_vec_pretty(&pointer).unwrap_or_default(),
     );
+    let state = AppState::new(exec, Some(metrics)).with_control(Some(token), allowed, origin);
     let result = serve(
         HostConfig {
             bind,
-            limits: exec.limits().clone(),
+            limits: state.executor.limits().clone(),
+            auth_token: state.auth_token.clone(),
+            allowed_hosts: state.allowed_hosts.clone(),
         },
-        AppState::new(exec, Some(metrics)),
+        state,
         cancel,
     )
     .await;
@@ -493,6 +650,7 @@ async fn daemon_run(
     drop(ctrlc_task);
     result?;
     drop(sentry);
+    drop(ownership);
     Ok(())
 }
 
@@ -522,39 +680,6 @@ fn ctrlc(cancel: CancellationToken) -> tokio::task::JoinHandle<()> {
         let _ = tokio::signal::ctrl_c().await;
         cancel.cancel();
     })
-}
-
-fn install(dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let exe = std::env::current_exe()?;
-    let data = data_dir(dir);
-    let unit = format!(
-        "[Unit]\nDescription=Executor daemon\n[Service]\nExecStart={} daemon run --port {DEFAULT_SERVICE_PORT}\nEnvironment=EXECUTOR_DATA_DIR={}\nRestart=on-failure\n[Install]\nWantedBy=default.target\n",
-        exe.display(),
-        data.display()
-    );
-    let path = systemd_unit_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, unit)?;
-    println!("wrote {}", path.display());
-    println!("enable with: systemctl --user enable --now executor.service");
-    Ok(())
-}
-
-fn uninstall() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let path = systemd_unit_path()?;
-    match std::fs::remove_file(&path) {
-        Ok(()) => println!("removed {}", path.display()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("not installed"),
-        Err(e) => return Err(e.into()),
-    }
-    Ok(())
-}
-
-fn systemd_unit_path() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-    let home = std::env::var("HOME")?;
-    Ok(PathBuf::from(home).join(".config/systemd/user/executor.service"))
 }
 
 async fn cmd_login(

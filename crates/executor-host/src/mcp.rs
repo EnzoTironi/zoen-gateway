@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use executor_core::{ExecuteOptions, ExecutionId, ResumeAction, SearchArgs, Toolkit};
+use executor_core::{
+    ExecuteOptions, ExecutionId, PersistChoice, ResumeAction, ResumeRequest, SearchArgs, Toolkit,
+};
 use executor_engine::Executor;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -362,7 +364,28 @@ async fn call_resume(executor: &Executor, id: Value, args: Value, opts: &McpOpti
             _ => ResumeAction::Accept,
         },
     };
-    match executor.resume(&parsed, action).await {
+    let persist = args
+        .get("persist")
+        .and_then(Value::as_str)
+        .and_then(PersistChoice::parse);
+    let content = args.get("content").cloned().map(|c| {
+        if let Value::String(raw) = &c {
+            serde_json::from_str(raw).unwrap_or(c)
+        } else {
+            c
+        }
+    });
+    match executor
+        .resume_request(
+            &parsed,
+            ResumeRequest {
+                action,
+                content,
+                persist,
+            },
+        )
+        .await
+    {
         Ok(outcome) => mcp_ok(&id, &outcome.execution_api()),
         Err(e) => rpc_error(&id, jsonrpc_code(&e), e.to_string()),
     }

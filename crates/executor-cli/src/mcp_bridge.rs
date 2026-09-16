@@ -11,7 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 /// # Errors
 ///
 /// IO.
-pub async fn run(origin: &str, query: &str) -> Result<(), std::io::Error> {
+pub async fn run(origin: &str, query: &str, token: Option<&str>) -> Result<(), std::io::Error> {
     let client = Client::new();
     let mcp = format!("{}/mcp{}", origin.trim_end_matches('/'), query);
     let stdin = tokio::io::stdin();
@@ -38,6 +38,9 @@ pub async fn run(origin: &str, query: &str) -> Result<(), std::io::Error> {
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
             .json(&body);
+        if let Some(token) = token.filter(|s| !s.is_empty()) {
+            req = req.header("authorization", format!("Bearer {token}"));
+        }
         if let Some(id) = &session {
             req = req.header("mcp-session-id", id);
         }

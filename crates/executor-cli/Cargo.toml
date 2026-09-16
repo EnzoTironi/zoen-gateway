@@ -17,6 +17,7 @@ executor-core.workspace = true
 executor-engine.workspace = true
 executor-host.workspace = true
 executor-sdk.workspace = true
+executor-storage.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

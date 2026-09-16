@@ -8,7 +8,7 @@ use executor_core::{
     AuthMethod, ConnectionInput, ConnectionName, Detection, ExecuteOptions, ExecutorError,
     HealthCheckCtx, IdempotencyKey, IntegrationConfig, IntegrationPlugin, IntegrationSlug,
     InvokeCtx, Limits, Outcome, PluginError, PluginId, PolicyAction, RegisterIntegration,
-    ResolveToolsCtx, ResolvedTools, ResumeAction, ToolDef, ToolName, ToolResult,
+    ResolveToolsCtx, ResolvedTools, ResumeAction, ResumeRequest, ToolDef, ToolName, ToolResult,
 };
 use serde_json::json;
 use tokio::sync::Notify;
@@ -361,6 +361,119 @@ async fn approval_pause_and_resume() {
         },
         Outcome::Paused { .. } => panic!("still paused"),
     }
+}
+
+#[tokio::test]
+async fn resume_content_and_persist_session() {
+    use executor_core::PersistChoice;
+
+    let exec = wired(Arc::new(EchoPlugin), Limits::production(), "echo").await;
+    exec.execute(
+        "executor.coreTools.policies.create",
+        json!({"pattern":"echo.*","action":"require_approval","owner":"org"}),
+        ExecuteOptions {
+            auto_approve: true,
+            ..ExecuteOptions::default()
+        },
+    )
+    .await
+    .expect("policy");
+    let paused = exec
+        .execute(
+            "tools.echo.org.work.ping",
+            json!({"n": 3}),
+            ExecuteOptions::default(),
+        )
+        .await
+        .expect("pause");
+    let Outcome::Paused { execution } = paused else {
+        panic!("expected pause");
+    };
+    match &execution.reason {
+        executor_core::PauseReason::Approval { schema, .. } => {
+            assert!(schema.is_some(), "approval form schema");
+        }
+        other => panic!("expected approval form, got {other:?}"),
+    }
+    let done = exec
+        .resume_request(
+            &execution.id,
+            ResumeRequest {
+                action: ResumeAction::Accept,
+                content: Some(json!({"n": 9, "persist": "session"})),
+                persist: Some(PersistChoice::Session),
+            },
+        )
+        .await
+        .expect("resume");
+    match done {
+        Outcome::Completed {
+            result: ToolResult::Ok { data, .. },
+            ..
+        } => assert_eq!(data["n"], 9, "{data}"),
+        other => panic!("{other:?}"),
+    }
+    let second = exec
+        .execute(
+            "tools.echo.org.work.ping",
+            json!({"n": 1}),
+            ExecuteOptions::default(),
+        )
+        .await
+        .expect("session skip");
+    assert!(
+        matches!(
+            second,
+            Outcome::Completed {
+                result: ToolResult::Ok { .. },
+                ..
+            }
+        ),
+        "{second:?}"
+    );
+}
+
+#[tokio::test]
+async fn persist_always_writes_approve_policy() {
+    use executor_core::PersistChoice;
+
+    let exec = wired(Arc::new(EchoPlugin), Limits::production(), "echo").await;
+    exec.execute(
+        "executor.coreTools.policies.create",
+        json!({"pattern":"echo.*","action":"require_approval","owner":"org"}),
+        ExecuteOptions {
+            auto_approve: true,
+            ..ExecuteOptions::default()
+        },
+    )
+    .await
+    .expect("policy");
+    let paused = exec
+        .execute(
+            "tools.echo.org.work.ping",
+            json!({"n": 3}),
+            ExecuteOptions::default(),
+        )
+        .await
+        .expect("pause");
+    let Outcome::Paused { execution } = paused else {
+        panic!("expected pause");
+    };
+    exec.resume_request(
+        &execution.id,
+        ResumeRequest {
+            action: ResumeAction::Accept,
+            content: None,
+            persist: Some(PersistChoice::Always),
+        },
+    )
+    .await
+    .expect("resume");
+    let policies = exec.list_policies().expect("policies");
+    assert!(
+        policies.iter().any(|p| p.action == PolicyAction::Approve),
+        "{policies:?}"
+    );
 }
 
 #[test]

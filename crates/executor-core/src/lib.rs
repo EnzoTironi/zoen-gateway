@@ -47,7 +47,8 @@ pub use ema::{
 pub use error::{ExecutorError, InvalidId, StorageError};
 pub use execution::{
     ExecuteOptions, ExecutionId, ExecutionState, IdempotencyKey, Outcome, PauseReason,
-    PausedExecution, ResumeAction, ToolError, ToolFile, ToolHttpMeta, ToolResult, unix_now_ms,
+    PausedExecution, PersistChoice, ResumeAction, ResumeRequest, ToolError, ToolFile, ToolHttpMeta,
+    ToolResult, unix_now_ms,
 };
 pub use id::{
     ArtifactId, ConnectionName, ElicitationId, IntegrationSlug, OAuthClientSlug, PluginId,
@@ -83,5 +84,8 @@ pub use search::{SearchArgs, SearchPage, SearchableTool, ToolDiscovery, search_t
 pub use secret::{SecretRef, strip_secret_refs};
 pub use store::{BlobStore, CatalogStore, MemoryCatalog};
 pub use tool::{Tool, ToolAnnotations, ToolDef, ToolListFilter};
-pub use toolkit::{KV_OAUTH_CLIENTS, KV_OAUTH_SESSIONS, KV_TOOLKITS, Toolkit, ToolkitPolicy};
+pub use toolkit::{
+    KV_OAUTH_CLIENTS, KV_OAUTH_SESSIONS, KV_SESSION_APPROVALS, KV_SUBJECTS, KV_TOOLKITS,
+    LOCAL_SUBJECT, Toolkit, ToolkitPolicy,
+};
 pub use www_authenticate::{AuthChallenge, parse_challenges};

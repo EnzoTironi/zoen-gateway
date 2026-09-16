@@ -6,12 +6,13 @@ use axum::BoxError;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::middleware;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use executor_core::{
-    ExecuteOptions, ExecutionId, ExecutorError, IdempotencyKey, Limits, Outcome, ResumeAction,
-    ToolListFilter, metric_names,
+    ExecuteOptions, ExecutionId, ExecutorError, IdempotencyKey, Limits, Outcome, PersistChoice,
+    ResumeAction, ResumeRequest, ToolListFilter, metric_names,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -27,6 +28,7 @@ pub fn app(state: AppState, limits: &Limits) -> Router {
     let concurrency = usize::try_from(limits.max_in_flight).unwrap_or(256);
     let body = limits.max_arg_bytes.max(64 * 1024);
     let timeout = limits.execute_timeout;
+    let gate_state = state.clone();
     Router::new()
         .route("/health", get(health))
         .route("/api/health", get(api_health))
@@ -43,19 +45,22 @@ pub fn app(state: AppState, limits: &Limits) -> Router {
         .route("/executions/{execution_id}", get(api_get_execution))
         .route(
             "/executions/{execution_id}/resume",
-            post(api_resume_execution),
+            get(api_resume_execution_get).post(api_resume_execution),
         )
         .route(
             "/api/executions/{execution_id}/resume",
-            post(api_resume_execution),
+            get(api_resume_execution_get).post(api_resume_execution),
         )
         .route("/api/execute", post(api_execute))
         .route("/api/resume", post(api_resume))
         .route("/api/tools", get(api_tools))
+        .route("/api/tools/describe", get(api_tools_describe))
         .route("/api/integrations", get(api_integrations))
         .route("/api/integrations/detect", post(api_detect))
         .route("/api/policies", get(api_policies))
         .route("/api/oauth/clients", get(api_oauth_clients))
+        .route("/api/oauth/sessions", get(api_oauth_sessions))
+        .route("/api/subjects", get(api_subjects))
         .route("/api/toolkits", get(api_toolkits).post(api_toolkit_create))
         .route(
             "/api/toolkits/{slug}",
@@ -63,6 +68,12 @@ pub fn app(state: AppState, limits: &Limits) -> Router {
         )
         .merge(crate::auth::routes())
         .merge(crate::well_known::routes())
+        .merge(crate::cimd::routes())
+        .merge(crate::plugins::routes())
+        .layer(middleware::from_fn_with_state(
+            gate_state,
+            crate::guard::gate,
+        ))
         .layer(DefaultBodyLimit::max(body))
         .layer(
             ServiceBuilder::new()
@@ -279,6 +290,7 @@ async fn api_execute(
         body.args
     };
     map_outcome(
+        &state,
         state
             .executor
             .execute(
@@ -317,8 +329,10 @@ async fn api_executions(
         )
         .await
     {
-        Ok(outcome) => Json(outcome.execution_api()).into_response(),
-        Err(err) => map_outcome(Err(err)),
+        Ok(outcome) => {
+            Json(decorate_pause(&state, outcome.execution_api(), &outcome)).into_response()
+        }
+        Err(err) => map_outcome(&state, Err(err)),
     }
 }
 
@@ -346,24 +360,28 @@ struct ResumeBody {
     action: String,
     #[serde(default)]
     content: Option<Value>,
+    #[serde(default)]
+    persist: Option<String>,
 }
 
 async fn api_resume(
     State(state): State<AppState>,
     Json(body): Json<ResumeBody>,
 ) -> impl IntoResponse {
-    let _ = body.content;
     let id = match ExecutionId::new(&body.execution_id) {
         Ok(id) => id,
         Err(e) => return err_status(StatusCode::BAD_REQUEST, e.to_string()),
     };
-    let action = match body.action.as_str() {
-        "" | "accept" => ResumeAction::Accept,
-        "decline" => ResumeAction::Decline,
-        "cancel" => ResumeAction::Cancel,
-        other => return err_status(StatusCode::BAD_REQUEST, format!("unknown action {other}")),
-    };
-    map_outcome(state.executor.resume(&id, action).await)
+    map_outcome(
+        &state,
+        state
+            .executor
+            .resume_request(
+                &id,
+                parse_resume(&body.action, body.content, body.persist.as_deref()),
+            )
+            .await,
+    )
 }
 
 #[derive(Deserialize)]
@@ -372,6 +390,35 @@ struct ExecutionResumeBody {
     action: String,
     #[serde(default)]
     content: Option<Value>,
+    #[serde(default)]
+    persist: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ResumeQuery {
+    action: Option<String>,
+    persist: Option<String>,
+    content: Option<String>,
+}
+
+async fn api_resume_execution_get(
+    State(state): State<AppState>,
+    Path(execution_id): Path<String>,
+    Query(query): Query<ResumeQuery>,
+) -> impl IntoResponse {
+    let content = query
+        .content
+        .as_ref()
+        .map(|raw| serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.clone())));
+    resume_execution(
+        &state,
+        execution_id,
+        query.action.as_deref().unwrap_or("accept"),
+        content,
+        query.persist.as_deref(),
+        true,
+    )
+    .await
 }
 
 async fn api_resume_execution(
@@ -379,20 +426,51 @@ async fn api_resume_execution(
     Path(execution_id): Path<String>,
     Json(body): Json<ExecutionResumeBody>,
 ) -> impl IntoResponse {
-    let _ = body.content;
+    resume_execution(
+        &state,
+        execution_id,
+        &body.action,
+        body.content,
+        body.persist.as_deref(),
+        true,
+    )
+    .await
+}
+
+async fn resume_execution(
+    state: &AppState,
+    execution_id: String,
+    action: &str,
+    content: Option<Value>,
+    persist: Option<&str>,
+    execution_api: bool,
+) -> axum::response::Response {
     let id = match ExecutionId::new(&execution_id) {
         Ok(id) => id,
         Err(e) => return err_status(StatusCode::BAD_REQUEST, e.to_string()),
     };
-    let action = match body.action.as_str() {
-        "" | "accept" => ResumeAction::Accept,
+    match state
+        .executor
+        .resume_request(&id, parse_resume(action, content, persist))
+        .await
+    {
+        Ok(outcome) if execution_api => {
+            Json(decorate_pause(state, outcome.execution_api(), &outcome)).into_response()
+        }
+        other => map_outcome(state, other),
+    }
+}
+
+fn parse_resume(action: &str, content: Option<Value>, persist: Option<&str>) -> ResumeRequest {
+    let action = match action {
         "decline" => ResumeAction::Decline,
         "cancel" => ResumeAction::Cancel,
-        other => return err_status(StatusCode::BAD_REQUEST, format!("unknown action {other}")),
+        _ => ResumeAction::Accept,
     };
-    match state.executor.resume(&id, action).await {
-        Ok(outcome) => Json(outcome.execution_api()).into_response(),
-        Err(err) => map_outcome(Err(err)),
+    ResumeRequest {
+        action,
+        content,
+        persist: persist.and_then(PersistChoice::parse),
     }
 }
 
@@ -422,6 +500,18 @@ async fn api_tools(
         .into_response(),
         Err(e) => err_status(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+#[derive(Deserialize)]
+struct DescribeQuery {
+    path: String,
+}
+
+async fn api_tools_describe(
+    State(state): State<AppState>,
+    Query(query): Query<DescribeQuery>,
+) -> impl IntoResponse {
+    Json(state.executor.describe_shape(&query.path))
 }
 
 async fn api_integrations(State(state): State<AppState>) -> impl IntoResponse {
@@ -464,6 +554,20 @@ async fn api_oauth_clients(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+async fn api_oauth_sessions(State(state): State<AppState>) -> impl IntoResponse {
+    match state.executor.list_kv(executor_core::KV_OAUTH_SESSIONS) {
+        Ok(sessions) => Json(json!({ "sessions": sessions })).into_response(),
+        Err(e) => err_status(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn api_subjects(State(state): State<AppState>) -> impl IntoResponse {
+    match state.executor.list_kv(executor_core::KV_SUBJECTS) {
+        Ok(subjects) => Json(json!({ "subjects": subjects })).into_response(),
+        Err(e) => err_status(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
 async fn api_toolkits(State(state): State<AppState>) -> impl IntoResponse {
     match state.executor.list_kv(executor_core::KV_TOOLKITS) {
         Ok(toolkits) => Json(json!({ "toolkits": toolkits })).into_response(),
@@ -476,6 +580,7 @@ async fn api_toolkit_create(
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     map_outcome(
+        &state,
         state
             .executor
             .execute(
@@ -496,6 +601,7 @@ async fn api_toolkit_delete(
     Path(slug): Path<String>,
 ) -> impl IntoResponse {
     map_outcome(
+        &state,
         state
             .executor
             .execute(
@@ -511,16 +617,29 @@ async fn api_toolkit_delete(
     )
 }
 
-fn map_outcome(result: Result<Outcome, ExecutorError>) -> axum::response::Response {
+pub fn json_outcome(
+    state: &AppState,
+    result: Result<Outcome, ExecutorError>,
+) -> axum::response::Response {
+    map_outcome(state, result)
+}
+
+fn map_outcome(
+    state: &AppState,
+    result: Result<Outcome, ExecutorError>,
+) -> axum::response::Response {
     match result {
-        Ok(outcome) => Json(outcome.cli_json()).into_response(),
+        Ok(outcome) => Json(decorate_pause(state, outcome.cli_json(), &outcome)).into_response(),
         Err(err) => {
             let status = match &err {
                 ExecutorError::Overloaded { .. } => StatusCode::TOO_MANY_REQUESTS,
                 ExecutorError::Timeout { .. } => StatusCode::GATEWAY_TIMEOUT,
                 ExecutorError::Cancelled => StatusCode::REQUEST_TIMEOUT,
                 ExecutorError::ToolBlocked { .. } => StatusCode::FORBIDDEN,
-                ExecutorError::ToolNotFound { .. } => StatusCode::NOT_FOUND,
+                ExecutorError::ToolNotFound { .. } | ExecutorError::IntegrationNotFound(_) => {
+                    StatusCode::NOT_FOUND
+                }
+                ExecutorError::Conflict(_) => StatusCode::CONFLICT,
                 ExecutorError::InvalidArgs(_)
                 | ExecutorError::InvalidPattern(_)
                 | ExecutorError::InvalidId(_)
@@ -539,6 +658,27 @@ fn map_outcome(result: Result<Outcome, ExecutorError>) -> axum::response::Respon
             err_status(status, err.to_string())
         }
     }
+}
+
+fn decorate_pause(state: &AppState, mut wire: Value, outcome: &Outcome) -> Value {
+    if let Outcome::Paused { execution } = outcome {
+        let mut url = format!(
+            "{}/executions/{}/resume?action=accept",
+            state.public_origin.trim_end_matches('/'),
+            execution.id
+        );
+        if let Some(token) = &state.auth_token {
+            url.push_str("&_token=");
+            url.push_str(token);
+        }
+        wire["approvalUrl"] = json!(url);
+        if let Some(structured) = wire.get_mut("structured")
+            && let Some(obj) = structured.as_object_mut()
+        {
+            obj.insert("approvalUrl".into(), json!(url));
+        }
+    }
+    wire
 }
 
 fn layer_error(err: &BoxError) -> (StatusCode, Json<Value>) {

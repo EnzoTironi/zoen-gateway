@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use executor_host::DEFAULT_PORT;
+use executor_host::{DEFAULT_PORT, read_token};
 use executor_sdk::data_dir;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,7 +26,18 @@ pub fn pointer_path(dir: Option<&Path>) -> PathBuf {
     data_dir(dir).join("daemon.json")
 }
 
-/// Probe `/api/health` (original CLI probe).
+/// Bearer from `EXECUTOR_AUTH_TOKEN` or `{data_dir}/server-control/auth.json`.
+#[must_use]
+pub fn bearer_token(dir: Option<&Path>) -> Option<String> {
+    if let Ok(token) = std::env::var("EXECUTOR_AUTH_TOKEN")
+        && !token.is_empty()
+    {
+        return Some(token);
+    }
+    read_token(&data_dir(dir))
+}
+
+/// Probe `/api/health` (original CLI probe — unauthenticated).
 pub async fn is_healthy(origin: &str) -> bool {
     let url = format!("{}/api/health", origin.trim_end_matches('/'));
     reqwest::Client::new()
@@ -60,7 +71,7 @@ pub async fn ensure_daemon(
         return Ok(pointer.origin);
     }
     let port = free_port().unwrap_or(DEFAULT_PORT);
-    spawn_daemon(&data, port)?;
+    spawn_daemon(&data, port, "127.0.0.1", &[])?;
     let origin = format!("http://127.0.0.1:{port}");
     for _ in 0..80 {
         if is_healthy(&origin).await {
@@ -120,30 +131,59 @@ fn free_port() -> Option<u16> {
         .map(|a| a.port())
 }
 
-fn spawn_daemon(data: &Path, port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// Spawn `daemon run --foreground` detached (process group 0 on Unix).
+///
+/// # Errors
+///
+/// IO / spawn.
+pub fn spawn_daemon(
+    data: &Path,
+    port: u16,
+    hostname: &str,
+    allowed_hosts: &[String],
+) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
     fs::create_dir_all(data)?;
     let exe = std::env::current_exe()?;
     let log = fs::File::create(data.join("daemon.log"))?;
     let mut cmd = Command::new(&exe);
-    cmd.args(["daemon", "run", "--port", &port.to_string(), "--foreground"])
-        .env("EXECUTOR_DATA_DIR", data)
-        .stdin(Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log);
+    cmd.args([
+        "daemon",
+        "run",
+        "--port",
+        &port.to_string(),
+        "--hostname",
+        hostname,
+        "--foreground",
+    ])
+    .env("EXECUTOR_DATA_DIR", data)
+    .stdin(Stdio::null())
+    .stdout(log.try_clone()?)
+    .stderr(log);
+    for host in allowed_hosts {
+        cmd.args(["--allowed-host", host]);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
     let child = cmd.spawn()?;
+    let pid = child.id();
     write_pointer(
         data,
         &DaemonPointer {
-            origin: format!("http://127.0.0.1:{port}"),
-            pid: child.id(),
+            origin: format!("http://{hostname}:{port}"),
+            pid,
         },
     )?;
-    Ok(())
+    Ok(pid)
+}
+
+fn apply_bearer(mut req: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::RequestBuilder {
+    if let Some(token) = token.filter(|s| !s.is_empty()) {
+        req = req.header("authorization", format!("Bearer {token}"));
+    }
+    req
 }
 
 /// GET JSON from the daemon.
@@ -154,13 +194,17 @@ fn spawn_daemon(data: &Path, port: u16) -> Result<(), Box<dyn std::error::Error 
 pub async fn get_json(
     origin: &str,
     path: &str,
+    token: Option<&str>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("{}{path}", origin.trim_end_matches('/'));
-    let resp = reqwest::Client::new()
-        .get(url)
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await?;
+    let resp = apply_bearer(
+        reqwest::Client::new()
+            .get(url)
+            .timeout(Duration::from_secs(15)),
+        token,
+    )
+    .send()
+    .await?;
     let status = resp.status();
     let body = resp.json::<Value>().await.unwrap_or_else(|_| json_empty());
     if status.is_success() {
@@ -184,14 +228,18 @@ pub async fn post_json(
     origin: &str,
     path: &str,
     body: &Value,
+    token: Option<&str>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("{}{path}", origin.trim_end_matches('/'));
-    let resp = reqwest::Client::new()
-        .post(url)
-        .timeout(Duration::from_secs(310))
-        .json(body)
-        .send()
-        .await?;
+    let resp = apply_bearer(
+        reqwest::Client::new()
+            .post(url)
+            .timeout(Duration::from_secs(310))
+            .json(body),
+        token,
+    )
+    .send()
+    .await?;
     let status = resp.status();
     let json = resp.json::<Value>().await.unwrap_or_else(|_| json_empty());
     if status.is_success() {

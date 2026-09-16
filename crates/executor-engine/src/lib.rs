@@ -23,7 +23,8 @@ use std::sync::atomic::AtomicU64;
 use executor_core::{
     CatalogStore, Connection, ConnectionInput, ConnectionRef, ExecuteOptions, ExecutionId,
     ExecutorError, Integration, IntegrationPlugin, IntegrationSlug, Limits, MemoryCatalog, Metrics,
-    NoopMetrics, Outcome, PluginId, RegisterIntegration, ResumeAction, Tool, ToolListFilter,
+    NoopMetrics, Outcome, PluginId, RegisterIntegration, ResumeAction, ResumeRequest, Tool,
+    ToolListFilter,
 };
 use executor_secrets::{MemorySecrets, SecretResolver};
 use parking_lot::RwLock;
@@ -267,8 +268,29 @@ impl Executor {
         id: &ExecutionId,
         action: ResumeAction,
     ) -> Result<Outcome, ExecutorError> {
+        self.resume_request(
+            id,
+            ResumeRequest {
+                action,
+                content: None,
+                persist: None,
+            },
+        )
+        .await
+    }
+
+    /// Resume with form content and persist-choice.
+    ///
+    /// # Errors
+    ///
+    /// Missing/consumed execution, not paused, invoke failures.
+    pub async fn resume_request(
+        &self,
+        id: &ExecutionId,
+        request: ResumeRequest,
+    ) -> Result<Outcome, ExecutorError> {
         self.inner
-            .resume(id, action, self.inner.cancel.child_token())
+            .resume(id, request, self.inner.cancel.child_token())
             .await
     }
 
@@ -370,6 +392,30 @@ impl Executor {
     /// Storage.
     pub fn list_policies(&self) -> Result<Vec<executor_core::ToolPolicy>, ExecutorError> {
         Ok(self.inner.store.list_policies()?)
+    }
+
+    /// One integration row (config included).
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn get_integration_record(
+        &self,
+        slug: &IntegrationSlug,
+    ) -> Result<Option<executor_core::IntegrationRecord>, ExecutorError> {
+        Ok(self.inner.store.get_integration(slug)?)
+    }
+
+    /// Replace an integration row (config-plane updates).
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn put_integration_record(
+        &self,
+        row: executor_core::IntegrationRecord,
+    ) -> Result<(), ExecutorError> {
+        Ok(self.inner.store.put_integration(row)?)
     }
 
     /// Load a persisted execution (paused or completed).

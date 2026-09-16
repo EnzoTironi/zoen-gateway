@@ -450,6 +450,7 @@ async fn daemon_http_executes_github() {
             HostConfig {
                 bind,
                 limits: Limits::production(),
+                ..HostConfig::default()
             },
             AppState::new(server, None),
             serve_cancel,
@@ -540,4 +541,209 @@ async fn empty_catalog_lists_nothing_dynamic() {
         tools.iter().all(|t| t.static_tool),
         "empty catalog should only expose static tools"
     );
+}
+
+#[tokio::test]
+async fn jsonc_registers_openapi_integration() {
+    let emulate = urls();
+    let spec = github_openapi_spec(&emulate.github);
+    let src = format!(
+        r#"{{
+          // rust-native jsonc
+          "name": "demo",
+          "integrations": [{{
+            "kind": "openapi",
+            "slug": "github",
+            "name": "GitHub",
+            "spec": {spec},
+            "baseUrl": "{}"
+          }}]
+        }}"#,
+        emulate.github
+    );
+    let cfg = executor_sdk::parse_jsonc(&src).expect("jsonc");
+    let exec = in_memory(Limits::production());
+    executor_sdk::apply_config(&exec, &cfg)
+        .await
+        .expect("apply");
+    let rows = exec.list_integrations().expect("list");
+    assert!(rows.iter().any(|i| i.slug.as_str() == "github"), "{rows:?}");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn daemon_bearer_cimd_and_plugin_http() {
+    let exec = in_memory(Limits::production());
+    let cancel = CancellationToken::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let bind = listener.local_addr().expect("addr");
+    drop(listener);
+    let origin = format!("http://{bind}");
+    let token = "test-daemon-token";
+    let serve_cancel = cancel.clone();
+    let server = exec.clone();
+    let handle = tokio::spawn(async move {
+        serve(
+            HostConfig {
+                bind,
+                limits: Limits::production(),
+                auth_token: Some(token.to_owned()),
+                ..HostConfig::default()
+            },
+            AppState::new(server, None).with_control(
+                Some(token.to_owned()),
+                executor_host::default_allowed_hosts(),
+                origin,
+            ),
+            serve_cancel,
+        )
+        .await
+    });
+    let client = reqwest::Client::new();
+    let mut ok = false;
+    for _ in 0..50 {
+        if client
+            .get(format!("http://{bind}/api/health"))
+            .send()
+            .await
+            .is_ok_and(|r| r.status().is_success())
+        {
+            ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(ok, "health");
+    let denied = client
+        .get(format!("http://{bind}/api/tools"))
+        .send()
+        .await
+        .expect("tools");
+    assert_eq!(denied.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let cimd = client
+        .get(format!("http://{bind}/oauth/client-id-metadata.json"))
+        .send()
+        .await
+        .expect("cimd")
+        .json::<Value>()
+        .await
+        .expect("json");
+    assert_eq!(cimd["token_endpoint_auth_method"], "none");
+    assert!(
+        cimd["client_id"]
+            .as_str()
+            .is_some_and(|s| s.contains("client-id-metadata"))
+    );
+    let local = client
+        .get(format!("http://{bind}/oauth/client-id-metadata/local.json"))
+        .send()
+        .await
+        .expect("local cimd")
+        .json::<Value>()
+        .await
+        .expect("json");
+    assert_eq!(local["application_type"], "native");
+    let emulate = urls();
+    let spec = github_openapi_spec(&emulate.github);
+    let added = client
+        .post(format!("http://{bind}/openapi/specs"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "slug": "github",
+            "spec": spec,
+            "baseUrl": emulate.github,
+        }))
+        .send()
+        .await
+        .expect("addSpec")
+        .json::<Value>()
+        .await
+        .expect("json");
+    assert_eq!(added["status"], "completed", "{added}");
+    let listed = client
+        .get(format!("http://{bind}/api/integrations"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("integrations")
+        .json::<Value>()
+        .await
+        .expect("json");
+    assert!(
+        listed["integrations"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|i| i["slug"] == "github")),
+        "{listed}"
+    );
+    cancel.cancel();
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn get_resume_approves_paused_execution() {
+    let exec = in_memory(Limits::production());
+    add_github(&exec).await;
+    exec.execute(
+        "executor.coreTools.policies.create",
+        json!({"pattern":"github.*","action":"require_approval","owner":"org"}),
+        yes(),
+    )
+    .await
+    .expect("policy");
+    let path = find_tool(&exec, "github", "getauthenticated");
+    let paused = exec
+        .execute(&path, json!({}), ExecuteOptions::default())
+        .await
+        .expect("pause");
+    let Outcome::Paused { execution } = paused else {
+        panic!("expected pause, got {paused:?}");
+    };
+    let cancel = CancellationToken::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let bind = listener.local_addr().expect("addr");
+    drop(listener);
+    let serve_cancel = cancel.clone();
+    let server = exec.clone();
+    let handle = tokio::spawn(async move {
+        serve(
+            HostConfig {
+                bind,
+                limits: Limits::production(),
+                ..HostConfig::default()
+            },
+            AppState::new(server, None),
+            serve_cancel,
+        )
+        .await
+    });
+    let client = reqwest::Client::new();
+    for _ in 0..50 {
+        if client
+            .get(format!("http://{bind}/api/health"))
+            .send()
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let resumed = client
+        .get(format!(
+            "http://{bind}/executions/{}/resume?action=accept&persist=session",
+            execution.id
+        ))
+        .send()
+        .await
+        .expect("GET resume")
+        .json::<Value>()
+        .await
+        .expect("json");
+    assert_eq!(resumed["status"], "completed", "{resumed}");
+    cancel.cancel();
+    let _ = handle.await;
 }

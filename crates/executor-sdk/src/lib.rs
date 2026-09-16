@@ -13,6 +13,13 @@ use executor_plugin_openapi::OpenApiPlugin;
 use executor_secrets::{FileSecrets, MemorySecrets, load_or_create_key};
 use executor_storage::SqliteCatalog;
 
+mod config;
+
+pub use config::{
+    ExecutorFileConfig, IntegrationConfig, PluginConfig, apply_config, load_jsonc, parse_jsonc,
+    strip_jsonc,
+};
+
 /// How to construct a process-local executor.
 #[derive(Clone, Debug)]
 pub struct CreateOptions {

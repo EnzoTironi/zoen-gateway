@@ -4,9 +4,13 @@
 #![allow(clippy::result_large_err)]
 
 mod auth;
+mod bearer;
+mod cimd;
 mod edge;
+mod guard;
 mod http;
 mod mcp;
+mod plugins;
 mod sentry;
 mod skills;
 mod well_known;
@@ -20,7 +24,12 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 pub use auth::HostAuth;
+pub use bearer::{
+    auth_json_path, load_or_mint as load_or_mint_auth, load_or_mint_with as load_or_mint_auth_with,
+    read_token, rotate as rotate_auth,
+};
 pub use edge::worker_path_allowed;
+pub use guard::{default_allowed_hosts, is_public};
 pub use http::app;
 pub use mcp::{
     ElicitationMode, McpHub, McpMode, McpOptions, SharedMcpHub, as_sse, handle_jsonrpc,
@@ -36,6 +45,10 @@ pub struct HostConfig {
     pub bind: SocketAddr,
     /// Limits copied onto tower layers (body, concurrency, timeout).
     pub limits: Limits,
+    /// Daemon bearer. `None` disables the gate (in-process tests).
+    pub auth_token: Option<String>,
+    /// CORS / Origin allow-list (`*` allowed).
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for HostConfig {
@@ -43,6 +56,8 @@ impl Default for HostConfig {
         Self {
             bind: SocketAddr::from(([127, 0, 0, 1], 4788)),
             limits: Limits::production(),
+            auth_token: None,
+            allowed_hosts: default_allowed_hosts(),
         }
     }
 }
@@ -58,10 +73,16 @@ pub struct AppState {
     pub auth: Arc<HostAuth>,
     /// Streamable HTTP MCP sessions.
     pub mcp: Arc<McpHub>,
+    /// Bearer required by [`guard`] when `Some`.
+    pub auth_token: Option<String>,
+    /// Allowed CORS hosts.
+    pub allowed_hosts: Vec<String>,
+    /// Public origin used in pause `approvalUrl`s.
+    pub public_origin: String,
 }
 
 impl AppState {
-    /// Construct with an empty auth table.
+    /// Construct with an empty auth table and no daemon bearer.
     #[must_use]
     pub fn new(executor: Executor, metrics: Option<Arc<AtomicMetrics>>) -> Self {
         Self {
@@ -69,7 +90,24 @@ impl AppState {
             metrics,
             auth: Arc::new(HostAuth::new()),
             mcp: Arc::new(McpHub::new()),
+            auth_token: None,
+            allowed_hosts: default_allowed_hosts(),
+            public_origin: format!("http://127.0.0.1:{DEFAULT_PORT}"),
         }
+    }
+
+    /// Attach daemon bearer, allow-list, and public origin.
+    #[must_use]
+    pub fn with_control(
+        mut self,
+        token: Option<String>,
+        allowed_hosts: Vec<String>,
+        public_origin: String,
+    ) -> Self {
+        self.auth_token = token;
+        self.allowed_hosts = allowed_hosts;
+        self.public_origin = public_origin;
+        self
     }
 }
 

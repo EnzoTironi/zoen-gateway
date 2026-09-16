@@ -46,20 +46,26 @@ cargo test --workspace --all-features
 ## Run
 
 ```bash
-# in-process CLI against ~/.executor (or EXECUTOR_DATA_DIR)
+# CLI against ~/.executor (or EXECUTOR_DATA_DIR); call/tools/mcp auto-start the daemon
 executor tools list
 executor tools integrations
+executor call --help github --match list --limit 20
 executor call executor.openapi.addSpec '{"slug":"pets","spec":"{...}"}' --yes
 executor call tools.pets.org.work.pets.listPets '{}' --yes
 executor call --code 'return await tools.search({"query":"pets"});' --yes
 EXECUTOR_KERNEL=js executor call --code 'return 1 + 2;' --yes
+executor resume --execution-id <id> --action accept --content '{"n":1}' --persist session
+executor daemon run --hostname 127.0.0.1 --allowed-host http://localhost:4788
 executor serve --port 4788
+executor install --boot
 executor mcp          # auto-starts the daemon, then stdio-bridges to /mcp
 executor login --no-poll
 executor server add cloud --origin https://example.test --default
 ```
 
-Daemon HTTP (loopback by default; `EXECUTOR_BIND=0.0.0.0` for containers):
+`executor.jsonc` at the working directory or `$EXECUTOR_DATA_DIR/executor.jsonc` is applied on daemon boot (first-party `openapi` / `graphql` / `mcp` integrations; not JS factories).
+
+Daemon HTTP (loopback by default; `--hostname 0.0.0.0` or `EXECUTOR_BIND=0.0.0.0` for containers). Protected routes require `Authorization: Bearer`, `x-executor-token`, or `?_token=` from `{data_dir}/server-control/auth.json` (mode `0600`) unless `EXECUTOR_AUTH_TOKEN` / `--auth-token` overrides. `GET /health`, `GET /api/health`, well-known, CIMD, and the OAuth callback stay public.
 
 | Path | Purpose |
 |---|---|
@@ -69,16 +75,24 @@ Daemon HTTP (loopback by default; `EXECUTOR_BIND=0.0.0.0` for containers):
 | `POST /mcp` | Streamable HTTP MCP (`execute` / `skills` / `resume`) |
 | `POST /mcp/toolkits/:slug` | toolkit-scoped MCP |
 | `POST /executions` | `{ "code", "autoApprove" }` (also `/api/executions`) |
+| `GET` / `POST /executions/:id/resume` | approve-then-resume (`?action=accept&persist=session`; JSON body may carry `content`) |
 | `POST /api/execute` | `{ "path", "args", "auto_approve", "idempotency_key" }` |
 | `POST /api/execute-code` | `{ "source", "auto_approve" }` |
 | `GET /api/tools` | catalog page |
+| `GET /api/tools/describe` | one tool schema (`?path=`) |
+| `POST /openapi/specs` | OpenAPI `addSpec` |
+| `POST /graphql/integrations` | GraphQL `addIntegration` |
+| `POST /mcp/servers` | MCP `addServer` |
 | `GET /api/auth/cli-login` | RFC 8628 discovery |
 | `POST /api/oauth/register` | RFC 7591 DCR proxy |
 | `GET /api/oauth/callback` | authorization-code landing (prints JSON; no chrome) |
+| `GET /api/oauth/sessions` | persisted OAuth sessions |
+| `GET /api/subjects` | subject map |
+| `GET /oauth/client-id-metadata.json` | CIMD (also `/oauth/client-id-metadata/{target}`) |
 | `GET /.well-known/oauth-protected-resource` | RFC 9728 |
 | `GET /.well-known/oauth-authorization-server` | RFC 8414 (does **not** advertise ID-JAG) |
 
-Default data dir: `EXECUTOR_DATA_DIR` or `~/.executor`. Catalog and secrets file mode `0600`. Secret key: `EXECUTOR_SECRET_KEY` or `secret.key`.
+Default data dir: `EXECUTOR_DATA_DIR` or `~/.executor`. Exclusive lock: `data.db.owner-lock`. Catalog, secrets, and `auth.json` mode `0600`. Secret key: `EXECUTOR_SECRET_KEY` or `secret.key`. OS service: systemd `--user` (Linux), launchd (macOS), schtasks (Windows).
 
 ## Docker
 

@@ -62,3 +62,9 @@ pub const KV_TOOLKITS: &str = "toolkits";
 pub const KV_OAUTH_CLIENTS: &str = "oauth_clients";
 /// In-flight OAuth sessions (PKCE verifier).
 pub const KV_OAUTH_SESSIONS: &str = "oauth_sessions";
+/// Host principals seen by this tenant (`subject.external_id`).
+pub const KV_SUBJECTS: &str = "subjects";
+/// Per-tool session-scoped approvals (`persist=session`).
+pub const KV_SESSION_APPROVALS: &str = "session_approvals";
+/// Local single-user sentinel (original host `subject` partition).
+pub const LOCAL_SUBJECT: &str = "local";

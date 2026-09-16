@@ -154,3 +154,75 @@ fn server_profiles_and_whoami() {
     let (code, _, stderr) = run(dir.path(), &["login", "--help"]);
     assert_eq!(code, 0, "{stderr}");
 }
+
+#[test]
+fn call_help_browses_namespaces() {
+    let emulate = urls();
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let spec = github_openapi_spec(&emulate.github);
+    let add = json!({
+        "slug": "github",
+        "spec": spec,
+        "baseUrl": emulate.github,
+    });
+    let spec_file = dir.path().join("add.json");
+    std::fs::write(&spec_file, add.to_string()).expect("write");
+    let add_arg = format!("@{}", spec_file.display());
+    let (code, stdout, stderr) = run(
+        dir.path(),
+        &["call", "--yes", "executor.openapi.addSpec", &add_arg],
+    );
+    assert_eq!(code, 0, "addSpec failed: {stdout}{stderr}");
+    let conn = json!({
+        "integration": "github",
+        "name": "work",
+        "template": "none",
+    })
+    .to_string();
+    let (code, stdout, stderr) = run(
+        dir.path(),
+        &[
+            "call",
+            "--yes",
+            "executor.coreTools.connections.create",
+            &conn,
+        ],
+    );
+    assert_eq!(code, 0, "connection failed: {stdout}{stderr}");
+    let (code, stdout, stderr) = run(dir.path(), &["call", "--help"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stdout.contains("Browse:"), "{stdout}");
+    assert!(
+        stdout.contains("github") || stdout.contains("tools"),
+        "{stdout}"
+    );
+    let (code, stdout, stderr) = run(dir.path(), &["call", "--help", "github"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("prefix:") || stdout.contains("org") || stdout.contains("github"),
+        "{stdout}"
+    );
+    stop(dir.path());
+}
+
+#[test]
+fn install_boot_writes_unit() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let out = Command::new(bin())
+        .env("EXECUTOR_DATA_DIR", dir.path())
+        .env("HOME", dir.path())
+        .args(["install", "--boot"])
+        .output()
+        .expect("install");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code().unwrap_or(1), 0, "{stdout}{stderr}");
+    let unit = dir.path().join(".config/systemd/user/executor.service");
+    let text = std::fs::read_to_string(&unit).expect("unit");
+    assert!(text.contains("--foreground"), "{text}");
+    assert!(text.contains("--hostname"), "{text}");
+    assert!(
+        stdout.contains("linger") || stdout.contains("wrote"),
+        "{stdout}"
+    );
+}
