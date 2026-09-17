@@ -97,7 +97,7 @@ export default function CatalogPage() {
       {!loading && hits && hits.length === 0 && !error ? (
         <EmptyBlock
           title="Nenhum endpoint"
-          description="Tente outro trabalho, em português ou inglês. O catálogo local é um recorte; o restante dos YAML do Treg entra depois."
+          description="Tente outro trabalho, em português ou inglês. Com EXECUTOR_CATALOG_DIR o daemon ingere os YAML do Treg (seed vence nos ids já curados)."
         />
       ) : null}
       <div className="grid gap-3 md:grid-cols-2">

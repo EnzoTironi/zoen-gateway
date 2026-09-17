@@ -105,6 +105,13 @@ impl AppState {
         }
     }
 
+    /// Replace the catalog (YAML ingest at daemon boot).
+    #[must_use]
+    pub fn with_catalog(mut self, catalog: Arc<CatalogService>) -> Self {
+        self.catalog = catalog;
+        self
+    }
+
     /// Attach daemon bearer, allow-list, and public origin.
     #[must_use]
     pub fn with_control(

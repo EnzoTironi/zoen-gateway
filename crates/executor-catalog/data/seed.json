@@ -17,6 +17,23 @@
       }
     },
     {
+      "id": "demo.strict",
+      "capability": "demo.strict",
+      "provider": "demo",
+      "name": "Eco com query estrita",
+      "summary": "Rejeita parâmetros não declarados (contrato Treg strict_query).",
+      "jobs": ["strict query", "query estrita", "parâmetro inválido"],
+      "method": "GET",
+      "path": "/strict",
+      "base_url": "mock://demo",
+      "access": "anonymous",
+      "cost_micro": 0,
+      "strict_query": true,
+      "query": {
+        "text": { "type": "string", "required": true, "example": "olá" }
+      }
+    },
+    {
       "id": "hunter.people.email.find",
       "capability": "people.email.find",
       "provider": "hunter",

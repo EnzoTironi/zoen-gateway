@@ -1,5 +1,7 @@
 //! Catalog mutations: integrations, connections, tool refresh.
 
+use std::collections::BTreeMap;
+
 use executor_core::{
     Connection, ConnectionInput, ConnectionRef, CredentialMap, ExecutorError, Integration,
     IntegrationRecord, PluginId, ProviderKey, RegisterIntegration, ResolveToolsCtx, Tool, ToolDef,
@@ -84,6 +86,33 @@ impl Inner {
             Ok(_) | Err(ExecutorError::PluginNotLoaded(_)) => Ok(conn),
             Err(err) => Err(err),
         }
+    }
+
+    pub(crate) fn patch_connection(
+        &self,
+        id: &ConnectionRef,
+        identity_label: Option<String>,
+        description: Option<String>,
+        values: BTreeMap<String, String>,
+    ) -> Result<Connection, ExecutorError> {
+        let mut conn = self
+            .store
+            .get_connection(id)?
+            .ok_or_else(|| ExecutorError::ConnectionNotFound(id.as_key()))?;
+        if let Some(label) = identity_label {
+            conn.identity_label = Some(label).filter(|s| !s.is_empty());
+        }
+        if let Some(text) = description {
+            conn.description = Some(text).filter(|s| !s.is_empty());
+        }
+        for (var, value) in values {
+            if !value.is_empty() {
+                conn.secrets
+                    .insert(var, self.secrets.store_default(&value)?);
+            }
+        }
+        self.store.put_connection(conn.clone())?;
+        Ok(conn)
     }
 
     pub(crate) async fn refresh_connection(

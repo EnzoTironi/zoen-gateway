@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use executor_catalog::CatalogService;
 use executor_core::{compile_call, resolve_invocation, unix_now_ms};
 use executor_host::{
     AppState, DEFAULT_PORT, DEFAULT_SERVICE_PORT, HostConfig, default_allowed_hosts,
@@ -752,7 +753,9 @@ async fn daemon_run(opts: DaemonRun<'_>) -> Result<(), Box<dyn std::error::Error
         daemon::pointer_path(Some(&data)),
         serde_json::to_vec_pretty(&pointer).unwrap_or_default(),
     );
-    let state = AppState::new(exec, Some(metrics)).with_control(Some(token), allowed, origin);
+    let state = AppState::new(exec, Some(metrics))
+        .with_control(Some(token), allowed, origin)
+        .with_catalog(Arc::new(CatalogService::from_env_and_data_dir(Some(&data))));
     let result = serve(
         HostConfig {
             bind,
@@ -1034,14 +1037,28 @@ async fn cmd_catalog(
         None => {
             let body = daemon::get_json(&origin, "/api/catalog", token.as_deref()).await?;
             let mut providers: Vec<String> = body
-                .get("items")
+                .get("providers")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(|h| h.pointer("/endpoint/provider")?.as_str().map(str::to_owned))
+                .filter_map(|p| {
+                    p.get("slug")
+                        .and_then(Value::as_str)
+                        .or_else(|| p.as_str())
+                        .map(str::to_owned)
+                })
                 .collect();
-            providers.sort();
-            providers.dedup();
+            if providers.is_empty() {
+                providers = body
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|h| h.pointer("/endpoint/provider")?.as_str().map(str::to_owned))
+                    .collect();
+                providers.sort();
+                providers.dedup();
+            }
             if providers.is_empty() {
                 println!("(nenhum provedor no catálogo)");
             } else {

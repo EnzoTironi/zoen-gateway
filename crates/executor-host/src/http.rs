@@ -57,8 +57,16 @@ pub fn app(state: AppState, limits: &Limits) -> Router {
         .route("/api/tools/describe", get(api_tools_describe))
         .route("/api/integrations", get(api_integrations))
         .route("/api/integrations/detect", post(api_detect))
-        .route("/api/policies", get(api_policies))
-        .route("/api/oauth/clients", get(api_oauth_clients))
+        .route("/api/policies", get(api_policies).post(api_policy_create))
+        .route(
+            "/api/policies/{id}",
+            axum::routing::delete(api_policy_delete),
+        )
+        .route(
+            "/api/oauth/clients",
+            get(api_oauth_clients).post(api_oauth_client_create),
+        )
+        .route("/api/oauth/start", post(api_oauth_start))
         .route("/api/oauth/sessions", get(api_oauth_sessions))
         .route("/api/subjects", get(api_subjects))
         .route("/api/toolkits", get(api_toolkits).post(api_toolkit_create))
@@ -552,6 +560,90 @@ async fn api_policies(State(state): State<AppState>) -> impl IntoResponse {
         Ok(rows) => Json(json!({ "policies": rows })).into_response(),
         Err(e) => err_status(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+async fn api_policy_create(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    map_outcome(
+        &state,
+        state
+            .executor
+            .execute(
+                "executor.coreTools.policies.create",
+                body,
+                ExecuteOptions {
+                    auto_approve: true,
+                    timeout: None,
+                    idempotency_key: None,
+                },
+            )
+            .await,
+    )
+}
+
+async fn api_policy_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    map_outcome(
+        &state,
+        state
+            .executor
+            .execute(
+                "executor.coreTools.policies.remove",
+                json!({ "id": id }),
+                ExecuteOptions {
+                    auto_approve: true,
+                    timeout: None,
+                    idempotency_key: None,
+                },
+            )
+            .await,
+    )
+}
+
+async fn api_oauth_client_create(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    map_outcome(
+        &state,
+        state
+            .executor
+            .execute(
+                "executor.coreTools.oauth.clients.create",
+                body,
+                ExecuteOptions {
+                    auto_approve: true,
+                    timeout: None,
+                    idempotency_key: None,
+                },
+            )
+            .await,
+    )
+}
+
+async fn api_oauth_start(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    map_outcome(
+        &state,
+        state
+            .executor
+            .execute(
+                "executor.coreTools.oauth.start",
+                body,
+                ExecuteOptions {
+                    auto_approve: true,
+                    timeout: None,
+                    idempotency_key: None,
+                },
+            )
+            .await,
+    )
 }
 
 async fn api_oauth_clients(State(state): State<AppState>) -> impl IntoResponse {

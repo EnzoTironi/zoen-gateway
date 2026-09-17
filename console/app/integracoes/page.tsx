@@ -38,15 +38,22 @@ export default function IntegrationsPage() {
           Superfície Executor: OpenAPI, GraphQL, MCP e ferramentas internas.
           Conecte uma conta para o catálogo Treg usar a sua chave.
         </p>
+        <div className="flex flex-wrap gap-2">
+          <Button render={<Link href="/integracoes/explorar" />}>
+            Explorar catálogo
+          </Button>
+        </div>
       </div>
       {error ? <ErrorBlock message={error} /> : null}
       {rows === null ? <LoadingBlock /> : null}
       {rows && rows.length === 0 && !error ? (
         <EmptyBlock
           title="Nenhuma integração ainda"
-          description="O daemon local começa vazio. Conecte um provedor do catálogo ou adicione uma spec pelo CLI (`executor call executor.openapi.addSpec`)."
+          description="Explore o catálogo Executor (OpenAPI, GraphQL, MCP, Google) ou conecte um provedor Treg."
         >
-          <Button render={<Link href="/" />}>Ir ao catálogo</Button>
+          <Button render={<Link href="/integracoes/explorar" />}>
+            Explorar
+          </Button>
         </EmptyBlock>
       ) : null}
       <div className="grid gap-3 md:grid-cols-2">

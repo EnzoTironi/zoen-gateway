@@ -7,6 +7,7 @@
 
 mod call;
 mod money;
+mod yaml;
 
 use std::path::Path;
 
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 pub use call::{CallInput, CallOutcome, CatalogService, ServedVia, TeamTool};
 pub use money::{MemoryLedger, SIGNUP_GRANT_MICRO};
+pub use yaml::catalog_search_dirs;
 
 /// How an endpoint may be served without a team connection.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -61,6 +63,9 @@ pub struct Endpoint {
     /// Routed capability child.
     #[serde(default)]
     pub routed_child: Option<String>,
+    /// When true, `/call` rejects undeclared/missing query params and bodies (Treg `strict_query`).
+    #[serde(default)]
+    pub strict_query: bool,
 }
 
 /// Search hit.
@@ -104,23 +109,33 @@ impl Catalog {
     ///
     /// IO or YAML.
     pub fn load_yaml_dir(dir: &Path) -> Result<Self, CatalogError> {
-        let mut endpoints = Vec::new();
-        let entries =
-            std::fs::read_dir(dir).map_err(|e| CatalogError::InvalidDoc(e.to_string()))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| CatalogError::InvalidDoc(e.to_string()))?;
-            let path = entry.path();
-            let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if ext != "yaml" && ext != "yml" {
-                continue;
+        Ok(Self {
+            endpoints: yaml::load_yaml_dir(dir)?,
+        })
+    }
+
+    /// Bundled seed plus YAML dirs (`EXECUTOR_CATALOG_DIR`, optional `{data_dir}/catalog`).
+    #[must_use]
+    pub fn open_dirs(dirs: &[std::path::PathBuf]) -> Self {
+        let mut catalog = Self::bundled();
+        for dir in dirs {
+            match Self::load_yaml_dir(dir) {
+                Ok(extra) => catalog.merge(extra),
+                Err(err) => {
+                    tracing::warn!(path = %dir.display(), error = %err, "catalog yaml dir skipped");
+                }
             }
-            let text = std::fs::read_to_string(&path)
-                .map_err(|e| CatalogError::InvalidDoc(e.to_string()))?;
-            endpoints.extend(parse_treg_yaml(&text)?);
         }
-        Ok(Self { endpoints })
+        catalog
+    }
+
+    /// Insert endpoints whose ids are not already present (seed wins).
+    pub fn merge(&mut self, other: Self) {
+        for endpoint in other.endpoints {
+            if !self.endpoints.iter().any(|e| e.id == endpoint.id) {
+                self.endpoints.push(endpoint);
+            }
+        }
     }
 
     /// All endpoints.
@@ -133,6 +148,16 @@ impl Catalog {
     #[must_use]
     pub fn get(&self, id: &str) -> Option<&Endpoint> {
         self.endpoints.iter().find(|e| e.id == id)
+    }
+
+    /// Unique providers with endpoint counts (sorted by slug).
+    #[must_use]
+    pub fn providers(&self) -> Vec<(String, usize)> {
+        let mut counts = std::collections::BTreeMap::<String, usize>::new();
+        for endpoint in &self.endpoints {
+            *counts.entry(endpoint.provider.clone()).or_insert(0) += 1;
+        }
+        counts.into_iter().collect()
     }
 
     /// Ranked job search. Empty query lists by id.
@@ -202,83 +227,6 @@ struct SeedFile {
     endpoints: Vec<Endpoint>,
 }
 
-#[derive(Deserialize)]
-struct TregYaml {
-    #[serde(default)]
-    provider: Option<String>,
-    #[serde(default)]
-    endpoints: Vec<TregEndpoint>,
-}
-
-#[derive(Deserialize)]
-struct TregEndpoint {
-    id: String,
-    #[serde(default)]
-    capability: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    summary: Option<String>,
-    #[serde(default)]
-    method: Option<String>,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    cost: Option<TregCost>,
-}
-
-#[derive(Deserialize)]
-struct TregCost {
-    #[serde(default)]
-    value: Option<f64>,
-    #[serde(default)]
-    currency: Option<String>,
-}
-
-fn parse_treg_yaml(text: &str) -> Result<Vec<Endpoint>, CatalogError> {
-    let doc: TregYaml =
-        serde_yaml::from_str(text).map_err(|e| CatalogError::InvalidDoc(e.to_string()))?;
-    let provider = doc.provider.unwrap_or_else(|| "unknown".into());
-    Ok(doc
-        .endpoints
-        .into_iter()
-        .map(|e| {
-            let cost_micro = e.cost.as_ref().and_then(treg_cost_to_micro);
-            Endpoint {
-                id: e.id.clone(),
-                capability: e.capability.unwrap_or_else(|| e.id.clone()),
-                provider: provider.clone(),
-                name: e.name.unwrap_or_else(|| e.id.clone()),
-                summary: e.summary.unwrap_or_default(),
-                jobs: Vec::new(),
-                method: e.method.unwrap_or_else(|| "GET".into()),
-                path: e.path.unwrap_or_else(|| "/".into()),
-                base_url: format!("mock://{provider}"),
-                access: if cost_micro.is_some() {
-                    Access::Platform
-                } else {
-                    Access::OwnKeyOnly
-                },
-                cost_micro,
-                query: serde_json::Value::Null,
-                routed_child: None,
-            }
-        })
-        .collect())
-}
-
-fn treg_cost_to_micro(cost: &TregCost) -> Option<i64> {
-    let value = cost.value?;
-    if value <= 0.0 {
-        return Some(0);
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-    match cost.currency.as_deref() {
-        Some("usd" | "USD") => Some((value * 1_000_000.0) as i64),
-        _ => Some((value * 10_000.0) as i64),
-    }
-}
-
 /// Catalog / call errors.
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
@@ -304,6 +252,9 @@ pub enum CatalogError {
     /// Bad document or argument.
     #[error("{0}")]
     Invalid(&'static str),
+    /// Strict query / undeclared parameter.
+    #[error("{0}")]
+    ParameterInvalid(String),
     /// Parse / IO.
     #[error("{0}")]
     InvalidDoc(String),
@@ -340,6 +291,103 @@ mod tests {
             cat.get("demo.ping").map(|e| e.provider.as_str()),
             Some("demo")
         );
+        assert_eq!(cat.get("demo.ping").and_then(|e| e.cost_micro), Some(0));
+    }
+
+    #[test]
+    fn yaml_strict_query_and_usd_price() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("harvestapi.yaml"),
+            r"provider: harvestapi
+endpoints:
+  - id: harvestapi.linkedin.user.profile
+    name: Perfil LinkedIn
+    method: GET
+    path: /linkedin/profile
+    capability: linkedin.user.profile
+    strict_query: true
+    input:
+      queryParams:
+        publicIdentifier: { type: string, required: true, example: williamhgates }
+        url: { type: string, required: false }
+    cost: { value: 0.0064, currency: USD }
+",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("adapters.yaml"),
+            "provider: adapters\nendpoints: []\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("hunter.extended.yaml"),
+            "provider: hunter\nendpoints:\n  - id: hunter.x.should-skip\n    name: skip\n",
+        )
+        .unwrap();
+        let cat = Catalog::load_yaml_dir(dir.path()).unwrap();
+        let ep = cat.get("harvestapi.linkedin.user.profile").unwrap();
+        assert!(ep.strict_query);
+        assert_eq!(ep.cost_micro, Some(6400));
+        assert!(cat.get("hunter.x.should-skip").is_none());
+    }
+
+    #[test]
+    fn seed_wins_on_yaml_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("hunter.yaml"),
+            "provider: hunter\nendpoints:\n  - id: hunter.people.email.find\n    name: YAML\n    cost: { value: 1, currency: credit }\n  - id: hunter.account.get\n    name: Account\n    method: GET\n    path: /account\n",
+        )
+        .unwrap();
+        let mut cat = Catalog::bundled();
+        cat.merge(Catalog::load_yaml_dir(dir.path()).unwrap());
+        let find = cat.get("hunter.people.email.find").unwrap();
+        assert_eq!(find.cost_micro, Some(10_000));
+        assert_eq!(find.name, "Encontrar e-mail profissional");
+        assert!(cat.get("hunter.account.get").is_some());
+    }
+
+    #[tokio::test]
+    async fn strict_query_rejects_undeclared() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("strict.yaml"),
+            r"provider: harvestapi
+endpoints:
+  - id: harvestapi.linkedin.user.profile
+    method: GET
+    path: /linkedin/profile
+    strict_query: true
+    input:
+      queryParams:
+        publicIdentifier: { type: string, required: true }
+    cost: { value: 0.01, currency: USD }
+",
+        )
+        .unwrap();
+        let svc = CatalogService::from_catalog(Catalog::load_yaml_dir(dir.path()).unwrap());
+        let err = svc
+            .call(CallInput {
+                id: "harvestapi.linkedin.user.profile".into(),
+                query: std::iter::once(("main".into(), "1".into())).collect(),
+                subject: "local".into(),
+                ..CallInput::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CatalogError::ParameterInvalid(_)), "{err:?}");
+        let ok = svc
+            .call(CallInput {
+                id: "harvestapi.linkedin.user.profile".into(),
+                query: std::iter::once(("publicIdentifier".into(), "williamhgates".into()))
+                    .collect(),
+                subject: "local".into(),
+                ..CallInput::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(ok.status, 200);
     }
 
     #[tokio::test]

@@ -220,6 +220,22 @@ impl Executor {
         self.inner.refresh_connection(id).await
     }
 
+    /// Update connection metadata and optional secret values (write-only).
+    ///
+    /// # Errors
+    ///
+    /// Missing connection or secret store.
+    pub fn patch_connection(
+        &self,
+        id: &ConnectionRef,
+        identity_label: Option<String>,
+        description: Option<String>,
+        values: std::collections::BTreeMap<String, String>,
+    ) -> Result<Connection, ExecutorError> {
+        self.inner
+            .patch_connection(id, identity_label, description, values)
+    }
+
     /// Invoke a static or catalog tool. Bounded, timed, cancellable.
     ///
     /// # Errors

@@ -20,6 +20,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/catalog", get(search_catalog))
         .route("/api/catalog/{*id}", get(get_catalog))
         .route("/api/call", post(call_catalog))
+        .route("/api/integrations/browse", get(browse_integrations))
         .route("/api/balance", get(get_balance).post(topup_balance))
         .route("/api/balance/grant", post(topup_balance))
         .route("/api/team-tools", get(list_team_tools).post(add_team_tool))
@@ -43,6 +44,14 @@ async fn search_catalog(
     Json(json!({
         "items": hits,
         "total": hits.len(),
+        "catalog_size": state.catalog.catalog().all().len(),
+        "providers": state
+            .catalog
+            .catalog()
+            .providers()
+            .into_iter()
+            .map(|(slug, endpoints)| json!({ "slug": slug, "endpoints": endpoints }))
+            .collect::<Vec<_>>(),
     }))
 }
 
@@ -57,6 +66,89 @@ async fn get_catalog(State(state): State<AppState>, Path(id): Path<String>) -> i
         },
         |ep| Json(ep).into_response(),
     )
+}
+
+const GOOGLE_PRESETS: &[(&str, &str, &str, &str)] = &[
+    (
+        "google-gmail",
+        "Gmail",
+        "Mensagens, threads, labels e rascunhos.",
+        "https://www.googleapis.com/discovery/v1/apis/gmail/v1/rest",
+    ),
+    (
+        "google-calendar",
+        "Google Calendar",
+        "Calendários, eventos, ACLs e agendamento.",
+        "https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest",
+    ),
+    (
+        "google-drive",
+        "Google Drive",
+        "Arquivos, pastas, permissões e drives compartilhados.",
+        "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest",
+    ),
+    (
+        "google-sheets",
+        "Google Sheets",
+        "Planilhas, valores, intervalos e formatação.",
+        "https://www.googleapis.com/discovery/v1/apis/sheets/v4/rest",
+    ),
+    (
+        "google-docs",
+        "Google Docs",
+        "Documentos, edições estruturais e formatação.",
+        "https://www.googleapis.com/discovery/v1/apis/docs/v1/rest",
+    ),
+    (
+        "google-slides",
+        "Google Slides",
+        "Apresentações, slides e elementos de página.",
+        "https://www.googleapis.com/discovery/v1/apis/slides/v1/rest",
+    ),
+    (
+        "google-chat",
+        "Google Chat",
+        "Espaços, mensagens, membros e reações.",
+        "https://www.googleapis.com/discovery/v1/apis/chat/v1/rest",
+    ),
+    (
+        "google-tasks",
+        "Google Tasks",
+        "Listas de tarefas, itens e prazos.",
+        "https://www.googleapis.com/discovery/v1/apis/tasks/v1/rest",
+    ),
+];
+
+async fn browse_integrations(State(state): State<AppState>) -> impl IntoResponse {
+    Json(json!({
+        "plugins": [
+            {
+                "key": "openapi",
+                "name": "OpenAPI / Swagger",
+                "summary": "Registre uma spec HTTP (URL ou JSON). Inclui Google Discovery.",
+            },
+            {
+                "key": "graphql",
+                "name": "GraphQL",
+                "summary": "Endpoint GraphQL com schema opcional.",
+            },
+            {
+                "key": "mcp",
+                "name": "MCP",
+                "summary": "Servidor MCP HTTP ou comando stdio.",
+            },
+        ],
+        "google": GOOGLE_PRESETS.iter().map(|(id, name, summary, url)| {
+            json!({ "id": id, "name": name, "summary": summary, "url": url, "kind": "google-discovery" })
+        }).collect::<Vec<_>>(),
+        "providers": state
+            .catalog
+            .catalog()
+            .providers()
+            .into_iter()
+            .map(|(slug, endpoints)| json!({ "slug": slug, "endpoints": endpoints }))
+            .collect::<Vec<_>>(),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -158,6 +250,7 @@ async fn bootstrap(State(state): State<AppState>) -> impl IntoResponse {
         "token": state.auth_token,
         "locale": "pt-BR",
         "product": "executor-treg",
+        "catalog_size": state.catalog.catalog().all().len(),
     }))
 }
 
@@ -192,6 +285,14 @@ fn catalog_err(err: &CatalogError) -> axum::response::Response {
         )
             .into_response(),
         CatalogError::Invalid(msg) => (StatusCode::BAD_REQUEST, (*msg).to_string()).into_response(),
+        CatalogError::ParameterInvalid(msg) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "catalog_parameter_invalid",
+                "message": msg,
+            })),
+        )
+            .into_response(),
         CatalogError::InvalidDoc(msg) => (StatusCode::BAD_REQUEST, msg.clone()).into_response(),
         CatalogError::Upstream(msg) => (StatusCode::BAD_GATEWAY, msg.clone()).into_response(),
     }
@@ -341,5 +442,97 @@ mod tests {
         let listed = json_body(res).await;
         assert_eq!(listed["connections"][0]["integration"], "hunter");
         assert!(listed["connections"][0].get("values").is_none());
+    }
+
+    #[tokio::test]
+    async fn browse_and_strict_query_and_policy() {
+        let app = app();
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/integrations/browse")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = json_body(res).await;
+        assert!(
+            body["plugins"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|p| p["key"] == "openapi"),
+            "{body}"
+        );
+        assert!(
+            body["google"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|p| p["id"] == "google-gmail"),
+            "{body}"
+        );
+
+        let bad = json!({
+            "id": "demo.strict",
+            "query": { "text": "olá", "extra": "nope" }
+        })
+        .to_string();
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/call")
+                    .header("content-type", "application/json")
+                    .body(Body::from(bad))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let err = json_body(res).await;
+        assert_eq!(err["error"], "catalog_parameter_invalid");
+
+        let ok = json!({
+            "id": "demo.strict",
+            "query": { "text": "olá" }
+        })
+        .to_string();
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/call")
+                    .header("content-type", "application/json")
+                    .body(Body::from(ok))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = json_body(res).await;
+        assert_eq!(body["served_via"], "anonymous", "{body}");
+
+        let policy = json!({
+            "pattern": "demo.*",
+            "action": "require_approval"
+        })
+        .to_string();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/policies")
+                    .header("content-type", "application/json")
+                    .body(Body::from(policy))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(res.status().is_success(), "{}", json_body(res).await);
     }
 }

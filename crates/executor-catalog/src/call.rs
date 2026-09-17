@@ -117,6 +117,14 @@ impl CatalogService {
         }
     }
 
+    /// Bundled seed plus YAML from `EXECUTOR_CATALOG_DIR` and `{data_dir}/catalog`.
+    #[must_use]
+    pub fn from_env_and_data_dir(data_dir: Option<&std::path::Path>) -> Self {
+        Self::from_catalog(Catalog::open_dirs(&crate::yaml::catalog_search_dirs(
+            data_dir,
+        )))
+    }
+
     /// Searchable catalog.
     #[must_use]
     pub const fn catalog(&self) -> &Catalog {
@@ -204,6 +212,9 @@ impl CatalogService {
             .get(&input.id)
             .ok_or_else(|| CatalogError::NotFound(input.id.clone()))?
             .clone();
+        if endpoint.routed_child.is_none() {
+            enforce_strict_query(&endpoint, &input)?;
+        }
         if let Some(child_id) = endpoint.routed_child.as_ref() {
             let mut child_input = input.clone();
             child_input.id = child_id.clone();
@@ -268,6 +279,52 @@ fn ladder(
             provider: endpoint.provider.clone(),
         }),
     }
+}
+
+fn enforce_strict_query(endpoint: &Endpoint, input: &CallInput) -> Result<(), CatalogError> {
+    if !endpoint.strict_query {
+        return Ok(());
+    }
+    let Some(fields) = endpoint.query.as_object() else {
+        return Err(CatalogError::ParameterInvalid(
+            "use só os parâmetros de query declarados; omita o corpo".into(),
+        ));
+    };
+    if input.body.is_some() {
+        return Err(CatalogError::ParameterInvalid(
+            "use só os parâmetros de query declarados, uma vez cada; inclua os obrigatórios e omita o corpo".into(),
+        ));
+    }
+    for key in input.query.keys() {
+        let Some(spec) = fields.get(key) else {
+            return Err(CatalogError::ParameterInvalid(format!(
+                "parâmetro não declarado: {key}"
+            )));
+        };
+        if let Some(allowed) = spec.get("enum").and_then(Value::as_array) {
+            let value = input.query.get(key).map_or("", String::as_str);
+            let ok = allowed.iter().any(|item| item.as_str() == Some(value));
+            if !ok {
+                return Err(CatalogError::ParameterInvalid(format!(
+                    "valor não permitido para {key}"
+                )));
+            }
+        }
+    }
+    for (name, spec) in fields {
+        if spec.get("required").and_then(Value::as_bool) == Some(true) {
+            let empty = input
+                .query
+                .get(name)
+                .is_none_or(|value| value.trim().is_empty());
+            if empty {
+                return Err(CatalogError::ParameterInvalid(format!(
+                    "parâmetro obrigatório ausente: {name}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn invoke_endpoint(

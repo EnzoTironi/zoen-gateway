@@ -451,6 +451,7 @@ name = "executor-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "executor-catalog",
  "executor-core",
  "executor-engine",
  "executor-host",

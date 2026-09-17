@@ -80,6 +80,7 @@ export type CatalogEndpoint = {
   cost_micro: number | null;
   query: Record<string, { type?: string; required?: boolean; example?: string }>;
   routed_child?: string | null;
+  strict_query?: boolean;
 };
 
 export type CatalogHit = {

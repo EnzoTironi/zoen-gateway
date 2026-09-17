@@ -75,11 +75,15 @@ Protected routes require `Authorization: Bearer`, `x-executor-token`, `x-treg-to
 |---|---|
 | `GET /health` | liveness + loaded plugins |
 | `GET /api/health` | CLI probe; body `ok` |
-| `GET /api/catalog?q=` | job search |
+| `GET /api/catalog?q=` | job search (`providers`, `catalog_size`) |
 | `GET /api/catalog/{id}` | endpoint + price + schema |
-| `POST /api/call` | faithful priced/own-key call |
+| `POST /api/call` | faithful priced/own-key call; `strict_query` → 400 |
+| `GET /api/integrations/browse` | plugins + Google Discovery + Treg providers |
+| `GET/POST /api/policies` · `DELETE /api/policies/{id}` | org-outer policy |
 | `GET/POST /api/connections` | list / create (values write-only) |
-| `GET/DELETE /api/connections/{owner}/{integration}/{name}` | metadata / remove |
+| `GET/PATCH/DELETE /api/connections/{owner}/{integration}/{name}` | metadata / patch / remove |
+| `POST /api/connections/{…}/refresh` · `/validate` | health + re-resolve tools |
+| `POST /api/oauth/clients` · `POST /api/oauth/start` | public client + PKCE |
 | `GET /api/balance` · `POST /api/balance/grant` | micro-USD ledger |
 | `GET/POST /api/team-tools` | own relay tools |
 | `GET /api/console/bootstrap` | loopback UI session |
@@ -97,13 +101,14 @@ Shipped in `crates/executor-catalog/data/seed.json` (not 3k YAML endpoints):
 | Id | Access |
 |---|---|
 | `demo.echo` | anonymous, free |
+| `demo.strict` | anonymous, `strict_query` |
 | `hunter.people.email.find` / `.verify` | priced mock |
 | `treg.people.email.find` | routed capability → hunter child |
 | `github.user.get` | emulate when `GITHUB_EMULATOR_URL` is set |
 | `moz.backlinks.lookup` | priced mock |
 | `internal.private.crm` | unpublished price → refuse unless own key |
 
-YAML ingest (`Catalog::load_yaml_dir`) reads Treg-shaped documents when you point it at a directory.
+YAML ingest (`Catalog::load_yaml_dir` / `CatalogService::from_env_and_data_dir`) reads Treg-shaped documents from `EXECUTOR_CATALOG_DIR` (colon-separated) and `{data_dir}/catalog` on daemon boot. Seed ids win on merge. `*.extended.yaml` and meta files (`adapters`, `aliases`, `capabilities`, `contracts`) are skipped unless `EXECUTOR_CATALOG_INCLUDE_EXTENDED=1`.
 
 ## Crate layout
 
@@ -117,4 +122,4 @@ executor-test-support    npx emulate for integration tests
 
 ## Not in this cut (still on the union list)
 
-Full Treg YAML ingest (~60 providers), orgs/invites, Stripe top-up, Enrich Arena, vendor CLI jail, toolkits/policies/secrets screens. Deno / workerd kernels stay out on purpose.
+Overflow to relay, Stripe top-up, Enrich Arena, vendor CLI jail, skills upload, orgs/invites, daemon-embedded SPA. Deno / workerd kernels stay out on purpose.

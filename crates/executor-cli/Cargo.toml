@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+executor-catalog.workspace = true
 executor-core.workspace = true
 executor-engine.workspace = true
 executor-host.workspace = true

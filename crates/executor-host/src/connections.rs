@@ -25,10 +25,16 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/api/connections/{owner}/{integration}/{name}",
-            get(get_connection).delete(delete_connection),
+            get(get_connection)
+                .delete(delete_connection)
+                .patch(patch_connection),
         )
         .route(
             "/api/connections/{owner}/{integration}/{name}/refresh",
+            post(refresh_connection),
+        )
+        .route(
+            "/api/connections/{owner}/{integration}/{name}/validate",
             post(refresh_connection),
         )
         .route("/api/secrets", get(list_secrets))
@@ -182,6 +188,35 @@ async fn refresh_connection(
     match parse_ref(&owner, &integration, &name) {
         Ok(id) => match state.executor.refresh_connection(&id).await {
             Ok(tools) => Json(json!({ "tools": tools.len() })).into_response(),
+            Err(e) => exec_err(&e),
+        },
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PatchBody {
+    #[serde(default)]
+    identity_label: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    values: BTreeMap<String, String>,
+}
+
+async fn patch_connection(
+    State(state): State<AppState>,
+    Path((owner, integration, name)): Path<(String, String, String)>,
+    Json(body): Json<PatchBody>,
+) -> impl IntoResponse {
+    match parse_ref(&owner, &integration, &name) {
+        Ok(id) => match state.executor.patch_connection(
+            &id,
+            body.identity_label,
+            body.description,
+            body.values,
+        ) {
+            Ok(conn) => Json(public_connection(&conn)).into_response(),
             Err(e) => exec_err(&e),
         },
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),

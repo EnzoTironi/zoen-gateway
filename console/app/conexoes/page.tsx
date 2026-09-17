@@ -61,6 +61,19 @@ export default function ConnectionsPage() {
     }
   }
 
+  async function refresh(row: ConnectionRow) {
+    try {
+      await daemon(
+        `/api/connections/${row.owner}/${row.integration}/${row.name}/validate`,
+        { method: "POST" },
+      );
+      toast.success("Conexão validada");
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Não validou");
+    }
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -113,14 +126,24 @@ export default function ConnectionsPage() {
                 <TableCell>{row.name}</TableCell>
                 <TableCell>{row.template}</TableCell>
                 <TableCell className="text-right">
-                  <Button
-                    type="button"
-                    variant="destructive"
-                    size="sm"
-                    onClick={() => void remove(row)}
-                  >
-                    Remover
-                  </Button>
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void refresh(row)}
+                    >
+                      Validar
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => void remove(row)}
+                    >
+                      Remover
+                    </Button>
+                  </div>
                 </TableCell>
               </TableRow>
             ))}
