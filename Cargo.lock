@@ -430,6 +430,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "executor-catalog"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "executor-cli"
 version = "0.1.0"
 dependencies = [
@@ -504,6 +521,7 @@ name = "executor-host"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "executor-catalog",
  "executor-core",
  "executor-engine",
  "getrandom 0.2.17",

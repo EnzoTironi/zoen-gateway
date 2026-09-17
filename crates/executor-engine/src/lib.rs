@@ -355,6 +355,35 @@ impl Executor {
         Ok(self.inner.store.remove_connection(id)?)
     }
 
+    /// Fetch one connection.
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn get_connection(&self, id: &ConnectionRef) -> Result<Option<Connection>, ExecutorError> {
+        Ok(self.inner.store.get_connection(id)?)
+    }
+
+    /// Resolve the inject token for a connection (trusted space only).
+    ///
+    /// # Errors
+    ///
+    /// Storage or secret backend.
+    pub fn connection_inject_secret(
+        &self,
+        id: &ConnectionRef,
+    ) -> Result<Option<String>, ExecutorError> {
+        let Some(conn) = self.inner.store.get_connection(id)? else {
+            return Ok(None);
+        };
+        let values = self.inner.resolve_secrets(&conn)?;
+        Ok(values
+            .get("token")
+            .or_else(|| values.get("api_key"))
+            .or_else(|| values.values().next())
+            .cloned())
+    }
+
     /// Resolve a CLI path for inspect/describe.
     ///
     /// # Errors

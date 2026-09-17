@@ -30,6 +30,7 @@ pub fn is_public(path: &str) -> bool {
         || path == "/api/auth/device/code"
         || path == "/api/auth/device/token"
         || path == "/api/auth/device/verify"
+        || path == "/api/console/bootstrap"
 }
 
 fn request_token(headers: &HeaderMap, uri: &str) -> Option<String> {
@@ -44,6 +45,7 @@ fn request_token(headers: &HeaderMap, uri: &str) -> Option<String> {
     }
     if let Some(value) = headers
         .get("x-executor-token")
+        .or_else(|| headers.get("x-treg-token"))
         .and_then(|v| v.to_str().ok())
     {
         return Some(value.to_owned());
@@ -87,7 +89,9 @@ fn with_cors(mut response: Response, headers: &HeaderMap, allowed: &[String]) ->
             .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
         response.headers_mut().insert(
             header::ACCESS_CONTROL_ALLOW_HEADERS,
-            HeaderValue::from_static("authorization, content-type, mcp-session-id"),
+            HeaderValue::from_static(
+                "authorization, content-type, mcp-session-id, x-executor-token, x-treg-token",
+            ),
         );
         response.headers_mut().insert(
             header::ACCESS_CONTROL_ALLOW_METHODS,

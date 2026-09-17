@@ -1,11 +1,13 @@
-//! Loopback HTTP daemon and JSON-RPC MCP host. No UI.
+//! Loopback HTTP daemon and JSON-RPC MCP host. Console UI lives in `console/`.
 
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::result_large_err)]
 
 mod auth;
 mod bearer;
+mod catalog_api;
 mod cimd;
+pub(crate) mod connections;
 mod edge;
 mod guard;
 mod http;
@@ -18,6 +20,7 @@ mod well_known;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use executor_catalog::CatalogService;
 use executor_core::{AtomicMetrics, Limits};
 use executor_engine::Executor;
 use tokio::net::TcpListener;
@@ -79,6 +82,10 @@ pub struct AppState {
     pub allowed_hosts: Vec<String>,
     /// Public origin used in pause `approvalUrl`s.
     pub public_origin: String,
+    /// Console origin (`/resume/{id}` chrome).
+    pub console_origin: String,
+    /// Treg-style catalog + ledger.
+    pub catalog: Arc<CatalogService>,
 }
 
 impl AppState {
@@ -93,6 +100,8 @@ impl AppState {
             auth_token: None,
             allowed_hosts: default_allowed_hosts(),
             public_origin: format!("http://127.0.0.1:{DEFAULT_PORT}"),
+            console_origin: default_console_origin(),
+            catalog: Arc::new(CatalogService::bundled()),
         }
     }
 
@@ -135,3 +144,13 @@ pub const DEFAULT_PORT: u16 = 4788;
 
 /// Durable OS service default port (matches the original).
 pub const DEFAULT_SERVICE_PORT: u16 = 4789;
+
+/// Next.js console (uncommon port; avoids 3000/5173/8080).
+pub const DEFAULT_CONSOLE_PORT: u16 = 43123;
+
+/// Console origin from `EXECUTOR_CONSOLE_ORIGIN` or the default loopback port.
+#[must_use]
+pub fn default_console_origin() -> String {
+    std::env::var("EXECUTOR_CONSOLE_ORIGIN")
+        .unwrap_or_else(|_| format!("http://127.0.0.1:{DEFAULT_CONSOLE_PORT}"))
+}

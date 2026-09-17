@@ -1,4 +1,4 @@
-//! `executor` CLI — catalog, call, resume, MCP, daemon, login. No web UI.
+//! `executor` CLI — catalog, call, connections, resume, MCP, daemon, login, console.
 
 #![allow(clippy::module_name_repetitions)]
 
@@ -9,6 +9,7 @@ mod mcp_bridge;
 mod profiles;
 mod service;
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use clap::{Parser, Subcommand};
 use executor_core::{compile_call, resolve_invocation, unix_now_ms};
 use executor_host::{
     AppState, DEFAULT_PORT, DEFAULT_SERVICE_PORT, HostConfig, default_allowed_hosts,
-    load_or_mint_auth_with, serve,
+    default_console_origin, load_or_mint_auth_with, serve,
 };
 use executor_sdk::{
     CreateOptions, apply_config, create_executor_with_metrics, data_dir, load_jsonc,
@@ -26,12 +27,12 @@ use executor_storage::DataDirLock;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-/// Executor — integration catalog for agents.
+/// Executor ∪ Treg — integration catalog and priced tool gateway.
 #[derive(Parser, Debug)]
 #[command(
     name = "executor",
     version,
-    about = "Integration catalog for agents (CLI only)"
+    about = "Catálogo de integrações e ferramentas com preço (Executor ∪ Treg)"
 )]
 struct Cli {
     /// Catalog directory (overrides `EXECUTOR_DATA_DIR`).
@@ -162,6 +163,32 @@ enum Commands {
         #[arg(long)]
         no_open: bool,
     },
+    /// Open the pt-BR console (ensure daemon, print origin).
+    Web {
+        #[arg(long)]
+        no_open: bool,
+        /// Console origin (default `EXECUTOR_CONSOLE_ORIGIN` or :43123).
+        #[arg(long)]
+        origin: Option<String>,
+    },
+    /// Search the priced catalog by job.
+    Catalog {
+        #[command(subcommand)]
+        cmd: Option<CatalogCmd>,
+    },
+    /// Saved connections (secrets never printed).
+    Connections {
+        #[command(subcommand)]
+        cmd: ConnectionsCmd,
+    },
+    /// Prepaid mock balance (micro-USD).
+    Balance,
+    /// Team-owned relay tools.
+    #[command(name = "team-tool")]
+    TeamTool {
+        #[command(subcommand)]
+        cmd: TeamToolCmd,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -225,6 +252,69 @@ enum ServerCmd {
     Remove { name: String },
     /// Rotate a local bearer token on the profile.
     RotateToken { name: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum CatalogCmd {
+    /// Search by job (`encontrar e-mail`).
+    Search {
+        /// Job phrase.
+        #[arg(required = true, trailing_var_arg = true)]
+        job: Vec<String>,
+    },
+    /// One endpoint: schema + price.
+    Get {
+        /// Catalog id (`hunter.people.email.find`).
+        id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConnectionsCmd {
+    /// List metadata (no secret values).
+    List,
+    /// Create a connection (`--value token=…`).
+    Add {
+        integration: String,
+        name: String,
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long, default_value = "bearer")]
+        template: String,
+        #[arg(long)]
+        identity_label: Option<String>,
+        /// Repeatable `KEY=VALUE` (write-only).
+        #[arg(long = "value", value_name = "KEY=VALUE")]
+        values: Vec<String>,
+    },
+    /// Delete `owner integration name`.
+    Remove {
+        owner: String,
+        integration: String,
+        name: String,
+    },
+    /// Re-resolve tools.
+    Refresh {
+        owner: String,
+        integration: String,
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TeamToolCmd {
+    /// List team tools (no secrets).
+    List,
+    /// Register a relay (`base_url` + secret).
+    Add {
+        name: String,
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        base_url: String,
+        #[arg(long)]
+        secret: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -367,6 +457,14 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             cmd_docs(no_open);
             Ok(())
         }
+        Commands::Web { no_open, origin } => {
+            cmd_web(dir.as_deref(), no_open, origin).await?;
+            Ok(())
+        }
+        Commands::Catalog { cmd } => cmd_catalog(dir.as_deref(), cmd).await,
+        Commands::Connections { cmd } => cmd_connections(dir.as_deref(), cmd).await,
+        Commands::Balance => cmd_balance(dir.as_deref()).await,
+        Commands::TeamTool { cmd } => cmd_team_tool(dir.as_deref(), cmd).await,
     }
 }
 
@@ -424,6 +522,26 @@ async fn cmd_call(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let origin = daemon::ensure_daemon(dir).await?;
     let token = daemon::bearer_token(dir);
+    if code.is_none()
+        && looks_like_catalog_id(&path)
+        && let Some(id) = path.first()
+    {
+        let encoded = urlencoding_query(id);
+        if daemon::get_json(
+            &origin,
+            &format!("/api/catalog/{encoded}"),
+            token.as_deref(),
+        )
+        .await
+        .is_ok()
+        {
+            let query = catalog_query_from_path(&path)?;
+            let body = json!({ "id": id, "query": query });
+            let outcome = daemon::post_json(&origin, "/api/call", &body, token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            return Ok(());
+        }
+    }
     let source = if let Some(code) = code {
         code
     } else {
@@ -839,4 +957,228 @@ fn cmd_docs(no_open: bool) {
     if !no_open {
         login::try_open(url);
     }
+}
+
+fn looks_like_catalog_id(path: &[String]) -> bool {
+    let Some(first) = path.first() else {
+        return false;
+    };
+    !first.starts_with("tools.") && !first.starts_with("executor.") && first.contains('.')
+}
+
+fn catalog_query_from_path(
+    path: &[String],
+) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error + Send + Sync>> {
+    let last = path.last().cloned().unwrap_or_default();
+    let json_text = if let Some(file) = last.strip_prefix('@') {
+        std::fs::read_to_string(file)?
+    } else {
+        last
+    };
+    let trimmed = json_text.trim();
+    if !trimmed.starts_with('{') {
+        return Ok(BTreeMap::new());
+    }
+    let value: Value = serde_json::from_str(trimmed)?;
+    let mut query = BTreeMap::new();
+    if let Some(obj) = value.as_object() {
+        for (key, val) in obj {
+            match val {
+                Value::String(s) => {
+                    query.insert(key.clone(), s.clone());
+                }
+                Value::Null => {}
+                other => {
+                    query.insert(key.clone(), other.to_string());
+                }
+            }
+        }
+    }
+    Ok(query)
+}
+
+fn parse_values(
+    pairs: &[String],
+) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut values = BTreeMap::new();
+    for pair in pairs {
+        let Some((key, value)) = pair.split_once('=') else {
+            return Err(format!("--value deve ser KEY=VALUE, recebido {pair}").into());
+        };
+        values.insert(key.to_owned(), value.to_owned());
+    }
+    Ok(values)
+}
+
+async fn cmd_web(
+    dir: Option<&Path>,
+    no_open: bool,
+    origin: Option<String>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _daemon = daemon::ensure_daemon(dir).await?;
+    let url = origin.unwrap_or_else(default_console_origin);
+    println!("{url}");
+    if !no_open {
+        login::try_open(&url);
+    }
+    Ok(())
+}
+
+async fn cmd_catalog(
+    dir: Option<&Path>,
+    cmd: Option<CatalogCmd>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    match cmd {
+        None => {
+            let body = daemon::get_json(&origin, "/api/catalog", token.as_deref()).await?;
+            let mut providers: Vec<String> = body
+                .get("items")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|h| h.pointer("/endpoint/provider")?.as_str().map(str::to_owned))
+                .collect();
+            providers.sort();
+            providers.dedup();
+            if providers.is_empty() {
+                println!("(nenhum provedor no catálogo)");
+            } else {
+                for p in providers {
+                    println!("{p}");
+                }
+            }
+        }
+        Some(CatalogCmd::Search { job }) => {
+            let q = urlencoding_query(&job.join(" "));
+            let body =
+                daemon::get_json(&origin, &format!("/api/catalog?q={q}"), token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        Some(CatalogCmd::Get { id }) => {
+            let encoded = urlencoding_query(&id);
+            let body = daemon::get_json(
+                &origin,
+                &format!("/api/catalog/{encoded}"),
+                token.as_deref(),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_connections(
+    dir: Option<&Path>,
+    cmd: ConnectionsCmd,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    match cmd {
+        ConnectionsCmd::List => {
+            let body = daemon::get_json(&origin, "/api/connections", token.as_deref()).await?;
+            let rows = body
+                .get("connections")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if rows.is_empty() {
+                println!("(nenhuma conexão)");
+            } else {
+                for c in rows {
+                    println!(
+                        "{}/{}/{}\t{}",
+                        c.get("owner").and_then(Value::as_str).unwrap_or(""),
+                        c.get("integration").and_then(Value::as_str).unwrap_or(""),
+                        c.get("name").and_then(Value::as_str).unwrap_or(""),
+                        c.get("template").and_then(Value::as_str).unwrap_or("")
+                    );
+                }
+            }
+        }
+        ConnectionsCmd::Add {
+            integration,
+            name,
+            owner,
+            template,
+            identity_label,
+            values,
+        } => {
+            let mut body = json!({
+                "integration": integration,
+                "name": name,
+                "template": template,
+                "values": parse_values(&values)?,
+            });
+            if let Some(owner) = owner {
+                body["owner"] = json!(owner);
+            }
+            if let Some(label) = identity_label {
+                body["identity_label"] = json!(label);
+            }
+            let created =
+                daemon::post_json(&origin, "/api/connections", &body, token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&created)?);
+        }
+        ConnectionsCmd::Remove {
+            owner,
+            integration,
+            name,
+        } => {
+            let path = format!("/api/connections/{owner}/{integration}/{name}");
+            daemon::delete_json(&origin, &path, token.as_deref()).await?;
+            println!("removed {owner}/{integration}/{name}");
+        }
+        ConnectionsCmd::Refresh {
+            owner,
+            integration,
+            name,
+        } => {
+            let path = format!("/api/connections/{owner}/{integration}/{name}/refresh");
+            let body = daemon::post_json(&origin, &path, &json!({}), token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_balance(dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    let body = daemon::get_json(&origin, "/api/balance", token.as_deref()).await?;
+    println!("{}", serde_json::to_string_pretty(&body)?);
+    Ok(())
+}
+
+async fn cmd_team_tool(
+    dir: Option<&Path>,
+    cmd: TeamToolCmd,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    match cmd {
+        TeamToolCmd::List => {
+            let body = daemon::get_json(&origin, "/api/team-tools", token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        TeamToolCmd::Add {
+            name,
+            provider,
+            base_url,
+            secret,
+        } => {
+            let body = json!({
+                "name": name,
+                "provider": provider,
+                "base_url": base_url,
+                "secret": secret,
+            });
+            let created =
+                daemon::post_json(&origin, "/api/team-tools", &body, token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&created)?);
+        }
+    }
+    Ok(())
 }

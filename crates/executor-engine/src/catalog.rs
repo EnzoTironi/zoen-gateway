@@ -80,8 +80,10 @@ impl Inner {
             )));
         }
         self.store.put_connection(conn.clone())?;
-        self.refresh_connection(&id).await?;
-        Ok(conn)
+        match self.refresh_connection(&id).await {
+            Ok(_) | Err(ExecutorError::PluginNotLoaded(_)) => Ok(conn),
+            Err(err) => Err(err),
+        }
     }
 
     pub(crate) async fn refresh_connection(

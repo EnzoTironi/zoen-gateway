@@ -9,6 +9,7 @@ description = "Loopback HTTP daemon and MCP host (stdio + POST /mcp)."
 
 [dependencies]
 axum.workspace = true
+executor-catalog.workspace = true
 executor-core.workspace = true
 executor-engine.workspace = true
 parking_lot.workspace = true

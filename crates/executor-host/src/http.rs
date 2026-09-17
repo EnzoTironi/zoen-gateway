@@ -70,6 +70,8 @@ pub fn app(state: AppState, limits: &Limits) -> Router {
         .merge(crate::well_known::routes())
         .merge(crate::cimd::routes())
         .merge(crate::plugins::routes())
+        .merge(crate::connections::routes())
+        .merge(crate::catalog_api::routes())
         .layer(middleware::from_fn_with_state(
             gate_state,
             crate::guard::gate,
@@ -230,7 +232,7 @@ async fn mcp_dispatch(
     if method == "initialize" && session.is_none() {
         session = Some(state.mcp.create(opts.clone()));
     }
-    let response = handle_jsonrpc_with(&state.executor, body, &opts).await;
+    let response = handle_jsonrpc_with(&state.executor, &state.catalog, body, &opts).await;
     if response.is_null() {
         return StatusCode::ACCEPTED.into_response();
     }
@@ -406,6 +408,11 @@ async fn api_resume_execution_get(
     Path(execution_id): Path<String>,
     Query(query): Query<ResumeQuery>,
 ) -> impl IntoResponse {
+    if query.action.is_none() {
+        return api_get_execution(State(state), Path(execution_id))
+            .await
+            .into_response();
+    }
     let content = query
         .content
         .as_ref()
@@ -662,15 +669,11 @@ fn map_outcome(
 
 fn decorate_pause(state: &AppState, mut wire: Value, outcome: &Outcome) -> Value {
     if let Outcome::Paused { execution } = outcome {
-        let mut url = format!(
-            "{}/executions/{}/resume?action=accept",
-            state.public_origin.trim_end_matches('/'),
+        let url = format!(
+            "{}/resume/{}",
+            state.console_origin.trim_end_matches('/'),
             execution.id
         );
-        if let Some(token) = &state.auth_token {
-            url.push_str("&_token=");
-            url.push_str(token);
-        }
         wire["approvalUrl"] = json!(url);
         if let Some(structured) = wire.get_mut("structured")
             && let Some(obj) = structured.as_object_mut()

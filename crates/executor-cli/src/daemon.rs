@@ -9,7 +9,7 @@ use std::time::Duration;
 use executor_host::{DEFAULT_PORT, read_token};
 use executor_sdk::data_dir;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// On-disk pointer written by [`ensure_daemon`].
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -70,7 +70,7 @@ pub async fn ensure_daemon(
     {
         return Ok(pointer.origin);
     }
-    let port = free_port().unwrap_or(DEFAULT_PORT);
+    let port = preferred_port();
     spawn_daemon(&data, port, "127.0.0.1", &[])?;
     let origin = format!("http://127.0.0.1:{port}");
     for _ in 0..80 {
@@ -122,6 +122,13 @@ fn write_pointer(
         serde_json::to_vec_pretty(pointer)?,
     )?;
     Ok(())
+}
+
+fn preferred_port() -> u16 {
+    if TcpListener::bind(("127.0.0.1", DEFAULT_PORT)).is_ok() {
+        return DEFAULT_PORT;
+    }
+    free_port().unwrap_or(DEFAULT_PORT)
 }
 
 fn free_port() -> Option<u16> {
@@ -182,8 +189,49 @@ pub fn spawn_daemon(
 fn apply_bearer(mut req: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::RequestBuilder {
     if let Some(token) = token.filter(|s| !s.is_empty()) {
         req = req.header("authorization", format!("Bearer {token}"));
+        req = req.header("x-treg-token", token);
     }
     req
+}
+
+fn parse_error(status: reqwest::StatusCode, text: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<Value>(text) {
+        if let Some(m) = v.get("message").and_then(Value::as_str) {
+            return m.to_owned();
+        }
+        if let Some(e) = v.get("error").and_then(Value::as_str) {
+            return format!("{e}: {text}");
+        }
+        if !text.is_empty() {
+            return text.to_owned();
+        }
+    }
+    format!("{status}: {text}")
+}
+
+async fn send_json(
+    method: reqwest::Method,
+    origin: &str,
+    path: &str,
+    body: Option<&Value>,
+    token: Option<&str>,
+    timeout: Duration,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let url = format!("{}{path}", origin.trim_end_matches('/'));
+    let mut req = reqwest::Client::new().request(method, url).timeout(timeout);
+    if let Some(body) = body {
+        req = req.json(body);
+    }
+    let resp = apply_bearer(req, token).send().await?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if status.is_success() || status.as_u16() == 204 {
+        if text.is_empty() {
+            return Ok(json_empty());
+        }
+        return Ok(serde_json::from_str(&text).unwrap_or_else(|_| json!({"ok": true, "raw": text})));
+    }
+    Err(parse_error(status, &text).into())
 }
 
 /// GET JSON from the daemon.
@@ -196,27 +244,15 @@ pub async fn get_json(
     path: &str,
     token: Option<&str>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let url = format!("{}{path}", origin.trim_end_matches('/'));
-    let resp = apply_bearer(
-        reqwest::Client::new()
-            .get(url)
-            .timeout(Duration::from_secs(15)),
+    send_json(
+        reqwest::Method::GET,
+        origin,
+        path,
+        None,
         token,
+        Duration::from_secs(15),
     )
-    .send()
-    .await?;
-    let status = resp.status();
-    let body = resp.json::<Value>().await.unwrap_or_else(|_| json_empty());
-    if status.is_success() {
-        Ok(body)
-    } else {
-        Err(body
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("request failed")
-            .to_owned()
-            .into())
-    }
+    .await
 }
 
 /// POST JSON to the daemon.
@@ -230,28 +266,36 @@ pub async fn post_json(
     body: &Value,
     token: Option<&str>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let url = format!("{}{path}", origin.trim_end_matches('/'));
-    let resp = apply_bearer(
-        reqwest::Client::new()
-            .post(url)
-            .timeout(Duration::from_secs(310))
-            .json(body),
+    send_json(
+        reqwest::Method::POST,
+        origin,
+        path,
+        Some(body),
         token,
+        Duration::from_secs(310),
     )
-    .send()
-    .await?;
-    let status = resp.status();
-    let json = resp.json::<Value>().await.unwrap_or_else(|_| json_empty());
-    if status.is_success() {
-        Ok(json)
-    } else {
-        Err(json
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("request failed")
-            .to_owned()
-            .into())
-    }
+    .await
+}
+
+/// DELETE a daemon path.
+///
+/// # Errors
+///
+/// HTTP.
+pub async fn delete_json(
+    origin: &str,
+    path: &str,
+    token: Option<&str>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    send_json(
+        reqwest::Method::DELETE,
+        origin,
+        path,
+        None,
+        token,
+        Duration::from_secs(15),
+    )
+    .await
 }
 
 fn json_empty() -> Value {

@@ -38,12 +38,12 @@ fn help_and_empty_integrations() {
     assert!(stdout.contains("call"), "{stdout}");
     assert!(stdout.contains("login"), "{stdout}");
     assert!(stdout.contains("server"), "{stdout}");
-    assert!(
-        !stdout
-            .lines()
-            .any(|line| line.trim_start().starts_with("web ")),
-        "web subcommand must stay unported: {stdout}"
-    );
+    assert!(stdout.contains("web"), "{stdout}");
+    assert!(stdout.contains("catalog"), "{stdout}");
+    assert!(stdout.contains("connections"), "{stdout}");
+    let (code, stdout, stderr) = run(dir.path(), &["catalog", "search", "encontrar", "e-mail"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("hunter.people.email.find"), "{stdout}");
     let (code, stdout, stderr) = run(dir.path(), &["tools", "integrations"]);
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("(no integrations)"), "{stdout}");
