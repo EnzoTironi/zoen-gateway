@@ -1,6 +1,6 @@
 # Executor (Rust)
 
-A Rust port of [UsefulSoftwareCo/executor](https://github.com/UsefulSoftwareCo/executor): the integration layer for agents. One catalog of tools, credentials, and policy. Not an agent. Not a chat UI. No web console.
+A Rust port of [UsefulSoftwareCo/executor](https://github.com/UsefulSoftwareCo/executor): the integration layer for agents. One catalog of tools, credentials, and policy.
 
 The floor is a single verb — `execute(path, args)` — plus the catalog that makes that verb safe under load.
 
