@@ -51,6 +51,22 @@ fn help_and_empty_integrations() {
 }
 
 #[test]
+fn stale_pointer_to_foreign_daemon_does_not_401() {
+    let owner = tempfile::tempdir().expect("owner");
+    let visitor = tempfile::tempdir().expect("visitor");
+    let (code, stdout, stderr) = run(owner.path(), &["catalog", "search", "e-mail"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("hunter.people.email.find"), "{stdout}");
+    let pointer = owner.path().join("daemon.json");
+    std::fs::copy(&pointer, visitor.path().join("daemon.json")).expect("copy pointer");
+    let (code, stdout, stderr) = run(visitor.path(), &["catalog", "search", "e-mail"]);
+    assert_eq!(code, 0, "foreign daemon pointer must not 401: {stderr}");
+    assert!(stdout.contains("hunter.people.email.find"), "{stdout}");
+    stop(owner.path());
+    stop(visitor.path());
+}
+
+#[test]
 fn call_github_via_cli() {
     let emulate = urls();
     let dir = tempfile::tempdir().expect("tmpdir");

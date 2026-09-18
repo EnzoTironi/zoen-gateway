@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use executor_host::{DEFAULT_PORT, read_token};
+use executor_host::{DEFAULT_PORT, load_or_mint_auth, read_token};
 use executor_sdk::data_dir;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -50,6 +50,9 @@ pub async fn is_healthy(origin: &str) -> bool {
 
 /// Ensure a local daemon is reachable, spawning one when the host is loopback.
 ///
+/// Health on `:4788` is not enough: a parallel CLI with another `data_dir` can
+/// own that port. The origin must accept this directory's bearer.
+///
 /// # Errors
 ///
 /// Spawn failure, non-local host down, or health timeout.
@@ -65,28 +68,82 @@ pub async fn ensure_daemon(
         return Err(format!("EXECUTOR_DAEMON_URL {url} is not healthy").into());
     }
     let data = data_dir(dir);
+    let token = match bearer_token(Some(&data)) {
+        Some(token) => token,
+        None => load_or_mint_auth(&data)?,
+    };
     if let Some(pointer) = read_pointer(&data)
-        && is_healthy(&pointer.origin).await
+        && is_ours(&pointer.origin, &token).await
     {
         return Ok(pointer.origin);
     }
-    let port = preferred_port();
-    spawn_daemon(&data, port, "127.0.0.1", &[])?;
-    let origin = format!("http://127.0.0.1:{port}");
-    for _ in 0..80 {
-        if is_healthy(&origin).await {
-            write_pointer(
-                &data,
-                &DaemonPointer {
-                    origin: origin.clone(),
-                    pid: 0,
-                },
-            )?;
-            return Ok(origin);
+    let mut skip_default = false;
+    let mut last_origin = String::new();
+    for _ in 0..5 {
+        let port = if skip_default {
+            free_port().unwrap_or(DEFAULT_PORT)
+        } else {
+            preferred_port()
+        };
+        let pid = spawn_daemon(&data, port, "127.0.0.1", &[])?;
+        let origin = format!("http://127.0.0.1:{port}");
+        last_origin.clone_from(&origin);
+        for _ in 0..80 {
+            if is_ours(&origin, &token).await {
+                write_pointer(
+                    &data,
+                    &DaemonPointer {
+                        origin: origin.clone(),
+                        pid,
+                    },
+                )?;
+                return Ok(origin);
+            }
+            if !process_alive(pid) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        if process_alive(pid) {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+        }
+        skip_default = true;
     }
-    Err(format!("daemon did not become healthy at {origin}").into())
+    Err(format!("daemon did not become healthy at {last_origin}").into())
+}
+
+/// `/api/health` plus a gated probe so we do not steal a neighbor's listener.
+async fn is_ours(origin: &str, token: &str) -> bool {
+    if !is_healthy(origin).await {
+        return false;
+    }
+    let url = format!("{}/metrics", origin.trim_end_matches('/'));
+    reqwest::Client::new()
+        .get(url)
+        .header("authorization", format!("Bearer {token}"))
+        .timeout(Duration::from_millis(400))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success())
+}
+
+fn process_alive(pid: u32) -> bool {
+    if pid <= 1 {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
 }
 
 /// Stop via pid file and pointer.
