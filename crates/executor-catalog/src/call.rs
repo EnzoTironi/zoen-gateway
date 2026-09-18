@@ -1,7 +1,7 @@
 //! Credential ladder and faithful call runtime.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -43,14 +43,49 @@ pub enum ServedVia {
     Platform,
     /// Routed capability that named a child.
     Routed,
+    /// Platform account out; served through a disclosed overflow relay.
+    Overflow,
 }
 
 impl ServedVia {
     /// Own-key rungs are never metered.
     #[must_use]
     pub const fn metered(self) -> bool {
-        matches!(self, Self::Platform | Self::Routed)
+        matches!(self, Self::Platform | Self::Routed | Self::Overflow)
     }
+}
+
+/// Prepaid checkout intent (local confirm or Stripe webhook).
+#[derive(Clone, Debug, Serialize)]
+pub struct TopupIntent {
+    /// `tu_<n>`.
+    pub id: String,
+    /// Ledger subject.
+    pub subject: String,
+    /// Amount to grant on confirm.
+    pub amount_micro: i64,
+}
+
+/// One Enrich Arena capability and its competing endpoints.
+#[derive(Clone, Debug, Serialize)]
+pub struct ArenaCapability {
+    /// Job capability (`people.email.find`).
+    pub capability: String,
+    /// Competing catalog ids.
+    pub endpoints: Vec<ArenaEndpoint>,
+}
+
+/// Competitor row.
+#[derive(Clone, Debug, Serialize)]
+pub struct ArenaEndpoint {
+    /// Catalog id.
+    pub id: String,
+    /// Provider slug.
+    pub provider: String,
+    /// Display name.
+    pub name: String,
+    /// Published price.
+    pub cost_micro: Option<i64>,
 }
 
 /// Inputs for one `/call`.
@@ -92,6 +127,10 @@ pub struct CatalogService {
     ledger: MemoryLedger,
     calls: AtomicU64,
     team_tools: Mutex<HashMap<String, TeamToolStored>>,
+    overflow_relays: Mutex<HashMap<String, TeamToolStored>>,
+    overflow_opt_out: AtomicBool,
+    extra_clis: Mutex<HashSet<String>>,
+    pending_topups: Mutex<HashMap<String, (String, i64)>>,
 }
 
 impl CatalogService {
@@ -103,6 +142,10 @@ impl CatalogService {
             ledger: MemoryLedger::new(),
             calls: AtomicU64::new(1),
             team_tools: Mutex::new(HashMap::new()),
+            overflow_relays: Mutex::new(HashMap::new()),
+            overflow_opt_out: AtomicBool::new(false),
+            extra_clis: Mutex::new(HashSet::new()),
+            pending_topups: Mutex::new(HashMap::new()),
         }
     }
 
@@ -114,6 +157,10 @@ impl CatalogService {
             ledger: MemoryLedger::new(),
             calls: AtomicU64::new(1),
             team_tools: Mutex::new(HashMap::new()),
+            overflow_relays: Mutex::new(HashMap::new()),
+            overflow_opt_out: AtomicBool::new(false),
+            extra_clis: Mutex::new(HashSet::new()),
+            pending_topups: Mutex::new(HashMap::new()),
         }
     }
 
@@ -201,6 +248,176 @@ impl CatalogService {
             .map(|t| t.secret.clone())
     }
 
+    /// Longest `base_url` prefix match for a faithful `/call/{url}` relay.
+    #[must_use]
+    pub fn team_tool_for_url(&self, url: &str) -> Option<(TeamTool, String)> {
+        let mut best: Option<(usize, TeamTool, String)> = None;
+        for stored in self.team_tools.lock().values() {
+            let base = stored.meta.base_url.trim_end_matches('/');
+            if !base.is_empty() && url.starts_with(base) {
+                let len = base.len();
+                if best.as_ref().is_none_or(|(best_len, _, _)| len > *best_len) {
+                    best = Some((len, stored.meta.clone(), stored.secret.clone()));
+                }
+            }
+        }
+        best.map(|(_, meta, secret)| (meta, secret))
+    }
+
+    /// Register a platform overflow relay (secret write-only).
+    pub fn register_overflow_relay(
+        &self,
+        name: String,
+        provider: String,
+        base_url: String,
+        secret: String,
+    ) -> TeamTool {
+        let id = format!("ov_{}", self.calls.fetch_add(1, Ordering::Relaxed));
+        let meta = TeamTool {
+            id,
+            name,
+            provider: provider.clone(),
+            base_url,
+        };
+        self.overflow_relays.lock().insert(
+            provider,
+            TeamToolStored {
+                meta: meta.clone(),
+                secret,
+            },
+        );
+        meta
+    }
+
+    /// Overflow relays (no secrets).
+    #[must_use]
+    pub fn list_overflow_relays(&self) -> Vec<TeamTool> {
+        self.overflow_relays
+            .lock()
+            .values()
+            .map(|t| t.meta.clone())
+            .collect()
+    }
+
+    /// Teams may refuse overflow (Treg opt-out).
+    pub fn set_overflow_opt_out(&self, opt_out: bool) {
+        self.overflow_opt_out.store(opt_out, Ordering::Relaxed);
+    }
+
+    /// Current overflow opt-out.
+    #[must_use]
+    pub fn overflow_opt_out(&self) -> bool {
+        self.overflow_opt_out.load(Ordering::Relaxed)
+    }
+
+    /// Overflow secret for `provider`.
+    #[must_use]
+    pub fn overflow_secret_for(&self, provider: &str) -> Option<String> {
+        self.overflow_relays
+            .lock()
+            .get(provider)
+            .map(|t| t.secret.clone())
+    }
+
+    /// Allow a vendor CLI basename in the jail (`stripe`, `gh`, …).
+    ///
+    /// # Errors
+    ///
+    /// Empty, path-like, or denylisted name.
+    pub fn register_cli(&self, name: &str) -> Result<String, CatalogError> {
+        let name = normalize_cli_name(name)?;
+        self.extra_clis.lock().insert(name.clone());
+        Ok(name)
+    }
+
+    /// Whether `name` may run in the jail.
+    #[must_use]
+    pub fn cli_allowed(&self, name: &str) -> bool {
+        normalize_cli_name(name).is_ok_and(|n| {
+            DEFAULT_CLIS.contains(&n.as_str()) || self.extra_clis.lock().contains(&n)
+        })
+    }
+
+    /// Allowed CLI names (defaults + extras).
+    #[must_use]
+    pub fn list_clis(&self) -> Vec<String> {
+        let mut names: Vec<String> = DEFAULT_CLIS.iter().map(|s| (*s).to_owned()).collect();
+        names.extend(self.extra_clis.lock().iter().cloned());
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Create a pending top-up (does not credit until confirm).
+    ///
+    /// # Errors
+    ///
+    /// Non-positive amount.
+    pub fn create_topup(&self, subject: &str, micro: i64) -> Result<TopupIntent, CatalogError> {
+        if micro <= 0 {
+            return Err(CatalogError::Invalid("grant must be positive"));
+        }
+        let id = format!("tu_{}", self.calls.fetch_add(1, Ordering::Relaxed));
+        self.pending_topups
+            .lock()
+            .insert(id.clone(), (subject.to_owned(), micro));
+        Ok(TopupIntent {
+            id,
+            subject: subject.to_owned(),
+            amount_micro: micro,
+        })
+    }
+
+    /// Credit a pending top-up.
+    ///
+    /// # Errors
+    ///
+    /// Unknown id or ledger failure.
+    pub fn confirm_topup(&self, id: &str) -> Result<i64, CatalogError> {
+        let Some((subject, micro)) = self.pending_topups.lock().remove(id) else {
+            return Err(CatalogError::NotFound(id.to_owned()));
+        };
+        self.ledger.ensure_signup_grant(&subject)?;
+        self.ledger.grant(&subject, micro)
+    }
+
+    /// Capabilities with more than one published competitor (Arena).
+    #[must_use]
+    pub fn arena_capabilities(&self) -> Vec<ArenaCapability> {
+        let mut map = BTreeMap::<String, Vec<ArenaEndpoint>>::new();
+        for ep in self.catalog.all() {
+            if ep.routed_child.is_some() {
+                continue;
+            }
+            map.entry(ep.capability.clone())
+                .or_default()
+                .push(ArenaEndpoint {
+                    id: ep.id.clone(),
+                    provider: ep.provider.clone(),
+                    name: ep.name.clone(),
+                    cost_micro: ep.cost_micro,
+                });
+        }
+        map.into_iter()
+            .filter(|(_, endpoints)| endpoints.len() > 1)
+            .map(|(capability, endpoints)| ArenaCapability {
+                capability,
+                endpoints,
+            })
+            .collect()
+    }
+
+    /// Endpoints that compete on `capability` (routed parents omitted).
+    #[must_use]
+    pub fn endpoints_for_capability(&self, capability: &str) -> Vec<crate::Endpoint> {
+        self.catalog
+            .all()
+            .iter()
+            .filter(|ep| ep.capability == capability && ep.routed_child.is_none())
+            .cloned()
+            .collect()
+    }
+
     /// Run the credential ladder and invoke.
     ///
     /// # Errors
@@ -239,7 +456,7 @@ impl CatalogService {
             self.ledger.reserve(&input.subject, &call_id, meter)?;
         }
         match invoke_endpoint(&endpoint, &input, secret.as_deref()).await {
-            Ok((status, body)) => {
+            Ok((status, body)) if status < 500 => {
                 if meter > 0 {
                     self.ledger.settle(&call_id, meter)?;
                 }
@@ -251,11 +468,69 @@ impl CatalogService {
                     body,
                 })
             }
+            Ok((status, body)) => {
+                if meter > 0 {
+                    self.ledger.release(&call_id)?;
+                }
+                if let Some(out) = self.overflow_retry(&endpoint, &input, via).await? {
+                    return Ok(out);
+                }
+                Ok(CallOutcome {
+                    status,
+                    served_via: via,
+                    cost_micro: 0,
+                    child: None,
+                    body,
+                })
+            }
             Err(err) => {
                 if meter > 0 {
                     self.ledger.release(&call_id)?;
                 }
+                if let Some(out) = self.overflow_retry(&endpoint, &input, via).await? {
+                    return Ok(out);
+                }
                 Err(err)
+            }
+        }
+    }
+
+    async fn overflow_retry(
+        &self,
+        endpoint: &crate::Endpoint,
+        input: &CallInput,
+        via: ServedVia,
+    ) -> Result<Option<CallOutcome>, CatalogError> {
+        if !matches!(via, ServedVia::Platform | ServedVia::Routed) || self.overflow_opt_out() {
+            return Ok(None);
+        }
+        let Some(secret) = self.overflow_secret_for(&endpoint.provider) else {
+            return Ok(None);
+        };
+        let overflow_id = format!("call_{}", self.calls.fetch_add(1, Ordering::Relaxed));
+        let meter = endpoint.cost_micro.unwrap_or(0);
+        if meter > 0 {
+            self.ledger.ensure_signup_grant(&input.subject)?;
+            self.ledger.reserve(&input.subject, &overflow_id, meter)?;
+        }
+        match invoke_endpoint(endpoint, input, Some(&secret)).await {
+            Ok((status, body)) if status < 500 => {
+                if meter > 0 {
+                    self.ledger.settle(&overflow_id, meter)?;
+                }
+                Ok(Some(CallOutcome {
+                    status,
+                    served_via: ServedVia::Overflow,
+                    cost_micro: meter,
+                    child: None,
+                    body,
+                }))
+            }
+            Ok(_) | Err(_) => {
+                if meter > 0 {
+                    self.ledger.release(&overflow_id)?;
+                }
+                Ok(None)
             }
         }
     }
@@ -388,6 +663,22 @@ fn mock_body(endpoint: &Endpoint, input: &CallInput, secret: Option<&str>) -> Va
             "ok": true,
             "text": input.query.get("text").cloned().unwrap_or_else(|| "olá".into()),
         }),
+        "apollo.people.email.find" => {
+            let domain = input
+                .query
+                .get("domain")
+                .cloned()
+                .unwrap_or_else(|| "example.com".into());
+            let name = input
+                .query
+                .get("full_name")
+                .cloned()
+                .unwrap_or_else(|| "Ada Lovelace".into());
+            json!({
+                "person": { "email": format!("{}@{domain}", name.replace(' ', ".").to_ascii_lowercase()) },
+                "vendor": "apollo",
+            })
+        }
         "hunter.people.email.find" => {
             let domain = input
                 .query
@@ -426,6 +717,87 @@ fn mock_body(endpoint: &Endpoint, input: &CallInput, secret: Option<&str>) -> Va
         }),
         other => json!({"id": other, "ok": true, "own_key": used_own_key}),
     }
+}
+
+const DEFAULT_CLIS: &[&str] = &[
+    "stripe",
+    "gh",
+    "vercel",
+    "wrangler",
+    "supabase",
+    "aws",
+    "gcloud",
+    "railway",
+    "fly",
+    "heroku",
+    "netlify",
+    "pulumi",
+    "terraform",
+    "kubectl",
+    "docker",
+    "cargo",
+    "bun",
+    "pnpm",
+    "yarn",
+    "uv",
+    "git",
+];
+
+const DENIED_CLIS: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "fish",
+    "csh",
+    "ksh",
+    "python",
+    "python3",
+    "node",
+    "nodejs",
+    "ruby",
+    "perl",
+    "php",
+    "osascript",
+    "cmd",
+    "powershell",
+    "pwsh",
+    "sudo",
+    "su",
+    "doas",
+    "env",
+    "xargs",
+];
+
+/// Env var injected for a vendor CLI (`stripe` → `STRIPE_API_KEY`).
+#[must_use]
+pub fn cli_secret_env(binary: &str) -> String {
+    match binary {
+        "stripe" => "STRIPE_API_KEY".into(),
+        "gh" => "GH_TOKEN".into(),
+        "vercel" => "VERCEL_TOKEN".into(),
+        "aws" => "AWS_SECRET_ACCESS_KEY".into(),
+        "gcloud" => "CLOUDSDK_AUTH_ACCESS_TOKEN".into(),
+        other => format!("{}_TOKEN", other.replace('-', "_").to_ascii_uppercase()),
+    }
+}
+
+fn normalize_cli_name(name: &str) -> Result<String, CatalogError> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        return Err(CatalogError::Invalid("cli name must be a basename"));
+    }
+    if DENIED_CLIS.contains(&name) {
+        return Err(CatalogError::Invalid("cli is denylisted"));
+    }
+    Ok(name.to_owned())
 }
 
 fn urlencoding_lite(s: &str) -> String {

@@ -13,7 +13,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-pub use call::{CallInput, CallOutcome, CatalogService, ServedVia, TeamTool};
+pub use call::{
+    ArenaCapability, ArenaEndpoint, CallInput, CallOutcome, CatalogService, ServedVia, TeamTool,
+    TopupIntent, cli_secret_env,
+};
 pub use money::{MemoryLedger, SIGNUP_GRANT_MICRO};
 pub use yaml::catalog_search_dirs;
 
@@ -488,5 +491,104 @@ endpoints:
             .unwrap();
         assert_eq!(out.child.as_deref(), Some("hunter.people.email.find"));
         assert_eq!(out.served_via, ServedVia::Routed);
+    }
+
+    #[tokio::test]
+    async fn overflow_after_platform_500() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer ov-secret",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "via": "overflow"
+                })),
+            )
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(500).set_body_json(serde_json::json!({
+                    "error": "platform_out"
+                })),
+            )
+            .mount(&server)
+            .await;
+        let mut catalog = Catalog::bundled();
+        catalog.merge(Catalog {
+            endpoints: vec![Endpoint {
+                id: "moz.overflow.probe".into(),
+                capability: "backlinks.lookup".into(),
+                provider: "moz".into(),
+                name: "Overflow probe".into(),
+                summary: "wiremock".into(),
+                jobs: vec![],
+                method: "GET".into(),
+                path: "/probe".into(),
+                base_url: server.uri(),
+                access: Access::Platform,
+                cost_micro: Some(1_000),
+                query: serde_json::json!({}),
+                routed_child: None,
+                strict_query: false,
+            }],
+        });
+        let svc = CatalogService::from_catalog(catalog);
+        svc.register_overflow_relay(
+            "moz-overflow".into(),
+            "moz".into(),
+            server.uri(),
+            "ov-secret".into(),
+        );
+        let out = svc
+            .call(CallInput {
+                id: "moz.overflow.probe".into(),
+                subject: "overflow".into(),
+                ..CallInput::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(out.served_via, ServedVia::Overflow);
+        assert_eq!(out.body["via"], "overflow");
+        svc.set_overflow_opt_out(true);
+        let skipped = svc
+            .call(CallInput {
+                id: "moz.overflow.probe".into(),
+                subject: "overflow".into(),
+                ..CallInput::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(skipped.status, 500);
+        assert_eq!(skipped.served_via, ServedVia::Platform);
+    }
+
+    #[test]
+    fn arena_lists_email_competitors() {
+        let caps = CatalogService::bundled().arena_capabilities();
+        let email = caps.iter().find(|c| c.capability == "people.email.find");
+        assert!(email.is_some_and(|c| c.endpoints.len() >= 2), "{caps:?}");
+    }
+
+    #[test]
+    fn jail_denies_shells_and_allows_vendor() {
+        let svc = CatalogService::bundled();
+        assert!(svc.cli_allowed("stripe"));
+        assert!(!svc.cli_allowed("bash"));
+        assert!(svc.register_cli("echo").is_ok());
+        assert!(svc.cli_allowed("echo"));
+        assert!(svc.register_cli("../bash").is_err());
+    }
+
+    #[test]
+    fn topup_intent_credits_only_on_confirm() {
+        let svc = CatalogService::bundled();
+        let before = svc.balance("pay").unwrap();
+        let intent = svc.create_topup("pay", 2_000_000).unwrap();
+        assert_eq!(svc.ledger().balance("pay"), before);
+        let after = svc.confirm_topup(&intent.id).unwrap();
+        assert_eq!(after, before + 2_000_000);
     }
 }

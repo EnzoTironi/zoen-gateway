@@ -80,6 +80,12 @@ pub fn app(state: AppState, limits: &Limits) -> Router {
         .merge(crate::plugins::routes())
         .merge(crate::connections::routes())
         .merge(crate::catalog_api::routes())
+        .merge(crate::orgs::routes())
+        .merge(crate::bundles::routes())
+        .merge(crate::artifacts::routes())
+        .merge(crate::jail::routes())
+        .merge(crate::billing::routes())
+        .fallback(crate::spa::fallback)
         .layer(middleware::from_fn_with_state(
             gate_state,
             crate::guard::gate,

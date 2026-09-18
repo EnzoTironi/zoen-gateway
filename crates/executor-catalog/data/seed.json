@@ -73,6 +73,23 @@
       }
     },
     {
+      "id": "apollo.people.email.find",
+      "capability": "people.email.find",
+      "provider": "apollo",
+      "name": "Encontrar e-mail (Apollo)",
+      "summary": "Mesma capacidade que Hunter, para o Enrich Arena comparar custo e resposta.",
+      "jobs": ["encontrar e-mail", "find work email", "apollo", "enrich"],
+      "method": "GET",
+      "path": "/people/email",
+      "base_url": "mock://apollo",
+      "access": "platform",
+      "cost_micro": 8000,
+      "query": {
+        "domain": { "type": "string", "required": true, "example": "stripe.com" },
+        "full_name": { "type": "string", "required": true, "example": "Patrick Collison" }
+      }
+    },
+    {
       "id": "treg.people.email.find",
       "capability": "people.email.find",
       "provider": "treg",

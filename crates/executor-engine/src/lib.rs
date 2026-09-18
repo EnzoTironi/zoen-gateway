@@ -525,6 +525,15 @@ impl Executor {
     pub fn list_kv(&self, collection: &str) -> Result<Vec<serde_json::Value>, ExecutorError> {
         Ok(self.inner.store.list_kv(collection)?)
     }
+
+    /// KV delete.
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn delete_kv(&self, collection: &str, id: &str) -> Result<bool, ExecutorError> {
+        Ok(self.inner.store.delete_kv(collection, id)?)
+    }
 }
 
 /// Run a catalog op on a blocking thread so SQLite never parks a tokio worker.

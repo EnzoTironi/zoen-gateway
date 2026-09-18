@@ -1,5 +1,6 @@
 "use client";
 
+import { PageHeader } from "@/components/page";
 import { ErrorBlock } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
@@ -15,19 +16,16 @@ export default function ConnectPage() {
   const slug = params.slug;
 
   return (
-    <div className="mx-auto flex w-full max-w-lg flex-col gap-10">
-      <div className="flex flex-col gap-2">
-        <h1 className="text-2xl font-semibold tracking-tight">
-          Conectar {slug}
-        </h1>
-        <p className="text-muted-foreground text-sm">
-          Cole um token ou inicie OAuth com PKCE. A pausa abre a tela Retomar —
-          não imprimimos só a URL.
-        </p>
+    <>
+      <PageHeader
+        title={`Conectar ${slug}`}
+        description="Cole um token ou inicie OAuth com PKCE. A pausa abre a tela Retomar — não imprimimos só a URL."
+      />
+      <div className="flex max-w-lg flex-col gap-10">
+        <SecretForm slug={slug} />
+        <OauthForm slug={slug} />
       </div>
-      <SecretForm slug={slug} />
-      <OauthForm slug={slug} />
-    </div>
+    </>
   );
 }
 

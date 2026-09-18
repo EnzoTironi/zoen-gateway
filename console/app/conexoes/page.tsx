@@ -1,5 +1,15 @@
 "use client";
 
+import {
+  CardStack,
+  CardStackContent,
+  CardStackEntry,
+  CardStackEntryActions,
+  CardStackEntryContent,
+  CardStackEntryDescription,
+  CardStackEntryTitle,
+} from "@/components/card-stack";
+import { PageHeader } from "@/components/page";
 import { EmptyBlock, ErrorBlock, LoadingBlock } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,14 +23,6 @@ import {
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { daemon, type ConnectionRow } from "@/lib/daemon";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
@@ -75,19 +77,16 @@ export default function ConnectionsPage() {
   }
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="flex flex-col gap-2">
-          <h1 className="text-2xl font-semibold tracking-tight">Conexões</h1>
-          <p className="text-muted-foreground text-sm">
-            Credenciais nascem ligadas a uma integração. Os valores nunca voltam
-            na listagem.
-          </p>
-        </div>
-        <Button type="button" onClick={() => setOpen(true)}>
-          Nova conexão
-        </Button>
-      </div>
+    <>
+      <PageHeader
+        title="Conexões"
+        description="Credenciais nascem ligadas a uma integração. Os valores nunca voltam na listagem."
+        actions={
+          <Button type="button" size="sm" onClick={() => setOpen(true)}>
+            Nova conexão
+          </Button>
+        }
+      />
       {error ? <ErrorBlock message={error} /> : null}
       {rows === null ? <LoadingBlock /> : null}
       {rows && rows.length === 0 && !error ? (
@@ -95,60 +94,55 @@ export default function ConnectionsPage() {
           title="Nenhuma conexão"
           description="Salve um token ou chave de API. Com a sua chave, o catálogo não cobra micro-USD."
         >
-          <Button type="button" onClick={() => setOpen(true)}>
+          <Button type="button" size="sm" onClick={() => setOpen(true)}>
             Conectar conta
           </Button>
         </EmptyBlock>
       ) : null}
       {rows && rows.length > 0 ? (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Dono</TableHead>
-              <TableHead>Integração</TableHead>
-              <TableHead>Nome</TableHead>
-              <TableHead>Modelo</TableHead>
-              <TableHead className="text-right">Ações</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
+        <CardStack searchable>
+          <CardStackContent>
             {rows.map((row) => (
-              <TableRow key={`${row.owner}/${row.integration}/${row.name}`}>
-                <TableCell>{row.owner}</TableCell>
-                <TableCell>
-                  <Link
-                    className="underline-offset-4 hover:underline"
-                    href={`/integracoes/${row.integration}`}
+              <CardStackEntry
+                key={`${row.owner}/${row.integration}/${row.name}`}
+                searchText={`${row.owner} ${row.integration} ${row.name} ${row.template}`}
+              >
+                <CardStackEntryContent>
+                  <CardStackEntryTitle>{row.name}</CardStackEntryTitle>
+                  <CardStackEntryDescription>
+                    {row.owner}/{row.integration} · {row.template}
+                  </CardStackEntryDescription>
+                </CardStackEntryContent>
+                <CardStackEntryActions>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    nativeButton={false}
+                    render={<Link href={`/integracoes/${row.integration}`} />}
                   >
-                    {row.integration}
-                  </Link>
-                </TableCell>
-                <TableCell>{row.name}</TableCell>
-                <TableCell>{row.template}</TableCell>
-                <TableCell className="text-right">
-                  <div className="flex justify-end gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => void refresh(row)}
-                    >
-                      Validar
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="destructive"
-                      size="sm"
-                      onClick={() => void remove(row)}
-                    >
-                      Remover
-                    </Button>
-                  </div>
-                </TableCell>
-              </TableRow>
+                    Abrir
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void refresh(row)}
+                  >
+                    Validar
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    size="sm"
+                    onClick={() => void remove(row)}
+                  >
+                    Remover
+                  </Button>
+                </CardStackEntryActions>
+              </CardStackEntry>
             ))}
-          </TableBody>
-        </Table>
+          </CardStackContent>
+        </CardStack>
       ) : null}
       <CreateConnectionDialog
         open={open}
@@ -158,7 +152,7 @@ export default function ConnectionsPage() {
           void load();
         }}
       />
-    </div>
+    </>
   );
 }
 

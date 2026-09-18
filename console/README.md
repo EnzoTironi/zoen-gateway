@@ -1,6 +1,6 @@
 # Consola Executor ∪ Treg
 
-Interface em **português do Brasil**: Catálogo (busca por trabalho), Conexões, Ferramentas, Integrações, Saldo e Retomar.
+Interface em **português do Brasil**, no desenho do Executor original: sidebar (Integrações, Provedores, Políticas, Toolkits), card **Conectar um agente** na home, extras Treg (Catálogo, Saldo, Arena, Equipes, Skills, Artefatos). O daemon também serve a SPA em `http://127.0.0.1:4788` (`executor web`).
 
 ```bash
 # terminal 1 — daemon

@@ -1,8 +1,17 @@
 "use client";
 
+import {
+  CardStack,
+  CardStackContent,
+  CardStackEntry,
+  CardStackEntryActions,
+  CardStackEntryContent,
+  CardStackEntryDescription,
+  CardStackEntryTitle,
+} from "@/components/card-stack";
+import { PageHeader } from "@/components/page";
 import { ErrorBlock, LoadingBlock } from "@/components/states";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Spinner } from "@/components/ui/spinner";
 import { daemon, formatMicroUsd } from "@/lib/daemon";
 import { useCallback, useEffect, useState } from "react";
@@ -15,10 +24,18 @@ type Balance = {
   topup_url: string;
 };
 
+type Topup = {
+  mode: "local" | "stripe";
+  id: string;
+  amount_micro: number;
+  checkout_url?: string;
+  confirm_url?: string;
+};
+
 export default function BalancePage() {
   const [data, setData] = useState<Balance | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<"grant" | "topup" | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -34,7 +51,7 @@ export default function BalancePage() {
   }, [load]);
 
   async function grant() {
-    setBusy(true);
+    setBusy("grant");
     try {
       await daemon("/api/balance/grant", {
         method: "POST",
@@ -45,41 +62,80 @@ export default function BalancePage() {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Não creditou");
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   }
 
-  if (error) {
-    return <ErrorBlock message={error} />;
-  }
-  if (!data) {
-    return <LoadingBlock />;
+  async function checkout() {
+    setBusy("topup");
+    try {
+      const intent = await daemon<Topup>("/api/balance/topup", {
+        method: "POST",
+        body: JSON.stringify({ micro: 5_000_000 }),
+      });
+      if (intent.mode === "stripe" && intent.checkout_url) {
+        window.location.href = intent.checkout_url;
+        return;
+      }
+      if (intent.confirm_url) {
+        await daemon(intent.confirm_url, { method: "POST", body: "{}" });
+        toast.success("Top-up local de US$ 5,00 confirmado");
+        await load();
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Não abriu o checkout");
+    } finally {
+      setBusy(null);
+    }
   }
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-2">
-        <h1 className="text-2xl font-semibold tracking-tight">Saldo</h1>
-        <p className="text-muted-foreground text-sm">
-          Ledger local em micro-USD. Stripe fica para o próximo corte. A sua
-          chave nunca é cobrada.
-        </p>
-      </div>
-      <Card className="max-w-md">
-        <CardHeader>
-          <CardTitle>{formatMicroUsd(data.balance_micro)}</CardTitle>
-          <CardDescription>
-            Sujeito {data.subject} · crédito de cadastro aplicado uma vez por
-            processo.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Button type="button" onClick={() => void grant()} disabled={busy}>
-            {busy ? <Spinner data-icon="inline-start" /> : null}
-            Recarregar US$ 1,00 (local)
-          </Button>
-        </CardContent>
-      </Card>
-    </div>
+    <>
+      <PageHeader
+        title="Saldo"
+        description="Ledger em micro-USD. Sem STRIPE_SECRET_KEY o checkout confirma localmente. A sua chave nunca é cobrada."
+      />
+      {error ? <ErrorBlock message={error} /> : null}
+      {!data && !error ? <LoadingBlock /> : null}
+      {data ? (
+        <CardStack>
+          <CardStackContent>
+            <CardStackEntry>
+              <CardStackEntryContent>
+                <CardStackEntryTitle className="font-display text-[1.75rem] tracking-tight">
+                  {formatMicroUsd(data.balance_micro)}
+                </CardStackEntryTitle>
+                <CardStackEntryDescription>
+                  Sujeito {data.subject} · 402 inclui topup_url
+                </CardStackEntryDescription>
+              </CardStackEntryContent>
+              <CardStackEntryActions>
+                <Button
+                  type="button"
+                  onClick={() => void checkout()}
+                  disabled={busy !== null}
+                >
+                  {busy === "topup" ? (
+                    <Spinner data-icon="inline-start" />
+                  ) : null}
+                  Top-up US$ 5,00
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void grant()}
+                  disabled={busy !== null}
+                >
+                  {busy === "grant" ? (
+                    <Spinner data-icon="inline-start" />
+                  ) : null}
+                  Recarregar US$ 1,00
+                </Button>
+              </CardStackEntryActions>
+            </CardStackEntry>
+          </CardStackContent>
+        </CardStack>
+      ) : null}
+    </>
   );
 }

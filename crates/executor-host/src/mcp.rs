@@ -443,7 +443,12 @@ async fn call_tool(
             let inventory = integration_inventory(executor, opts);
             mcp_ok(
                 &id,
-                &skills_result(skill, opts.mode == McpMode::Passthrough, &inventory),
+                &skills_result(
+                    skill,
+                    opts.mode == McpMode::Passthrough,
+                    &inventory,
+                    &crate::bundles::extra_skills(executor),
+                ),
             )
         }
         "resume" if opts.mode == McpMode::Code => call_resume(executor, id, args, opts).await,

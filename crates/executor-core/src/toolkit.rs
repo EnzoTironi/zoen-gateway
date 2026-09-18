@@ -66,5 +66,17 @@ pub const KV_OAUTH_SESSIONS: &str = "oauth_sessions";
 pub const KV_SUBJECTS: &str = "subjects";
 /// Per-tool session-scoped approvals (`persist=session`).
 pub const KV_SESSION_APPROVALS: &str = "session_approvals";
+/// Teams (`slug` → name, owner, overflow opt-out).
+pub const KV_ORGS: &str = "orgs";
+/// Org memberships (`{org}:{subject}`).
+pub const KV_MEMBERSHIPS: &str = "memberships";
+/// Invite codes (`code` → org, role, email).
+pub const KV_INVITES: &str = "invites";
+/// Uploaded `SKILL.md` bundles.
+pub const KV_SKILLS: &str = "skills";
+/// Named artifacts (notes, outputs, generated UI).
+pub const KV_ARTIFACTS: &str = "artifacts";
+/// Enrich Arena votes (`capability` → winner id + counts).
+pub const KV_ARENA_VOTES: &str = "arena_votes";
 /// Local single-user sentinel (original host `subject` partition).
 pub const LOCAL_SUBJECT: &str = "local";

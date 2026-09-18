@@ -1,18 +1,55 @@
-const BASE = "/daemon";
+function apiBase(): string {
+  if (typeof window !== "undefined" && window.location.port !== "43123") {
+    return "";
+  }
+  return process.env.NEXT_PUBLIC_API_BASE ?? "/daemon";
+}
 
-let tokenPromise: Promise<string | null> | null = null;
+export type BootstrapSession = {
+  origin: string;
+  mcp_url: string;
+  token: string | null;
+  locale: string;
+  product: string;
+  catalog_size: number;
+};
+
+let bootstrapPromise: Promise<BootstrapSession | null> | null = null;
 
 /**
- * Lê o token de sessão do daemon local (`GET /api/console/bootstrap`).
+ * Lê a sessão da consola (`GET /api/console/bootstrap`).
+ *
+ * @returns Origem, URL MCP e bearer local, ou `null` se o daemon estiver fora.
+ */
+export async function daemonBootstrap(): Promise<BootstrapSession | null> {
+  bootstrapPromise ??= fetch(`${apiBase()}/api/console/bootstrap`)
+    .then((res) => (res.ok ? res.json() : null))
+    .then((body: Partial<BootstrapSession> | null) => {
+      if (!body) {
+        return null;
+      }
+      const origin = body.origin ?? "http://127.0.0.1:4788";
+      return {
+        origin,
+        mcp_url: body.mcp_url ?? `${origin.replace(/\/$/, "")}/mcp`,
+        token: body.token ?? null,
+        locale: body.locale ?? "pt-BR",
+        product: body.product ?? "executor-treg",
+        catalog_size: body.catalog_size ?? 0,
+      };
+    })
+    .catch(() => null);
+  return bootstrapPromise;
+}
+
+/**
+ * Lê o token de sessão do daemon local.
  *
  * @returns Bearer local ou `null` se o daemon estiver fora.
  */
 export async function daemonToken(): Promise<string | null> {
-  tokenPromise ??= fetch(`${BASE}/api/console/bootstrap`)
-    .then((res) => (res.ok ? res.json() : null))
-    .then((body: { token?: string } | null) => body?.token ?? null)
-    .catch(() => null);
-  return tokenPromise;
+  const boot = await daemonBootstrap();
+  return boot?.token ?? null;
 }
 
 /** Falha HTTP do daemon, com corpo JSON quando existir. */
@@ -45,7 +82,7 @@ export async function daemon<T>(path: string, init?: RequestInit): Promise<T> {
     headers.set("x-treg-token", token);
     headers.set("x-executor-token", token);
   }
-  const res = await fetch(`${BASE}${path}`, { ...init, headers });
+  const res = await fetch(`${apiBase()}${path}`, { ...init, headers });
   const text = await res.text();
   let json: unknown = null;
   if (text) {
@@ -148,6 +185,8 @@ export function servedViaLabel(via: string): string {
       return "Plataforma";
     case "routed":
       return "Roteado";
+    case "overflow":
+      return "Relay de overflow";
     default:
       return via;
   }

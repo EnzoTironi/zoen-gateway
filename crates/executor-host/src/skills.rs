@@ -83,36 +83,75 @@ pub fn execute_description(inventory: &str) -> String {
     text
 }
 
-/// Result of `skills({ name? })`.
+/// Uploaded skill listed beside the built-in guides.
+#[derive(Clone, Debug)]
+pub struct ExtraSkill {
+    /// Slug.
+    pub name: String,
+    /// One-line summary.
+    pub summary: String,
+    /// Markdown body.
+    pub body: String,
+}
+
+/// Result of `skills({ name? })` including uploaded bundles.
 #[must_use]
-pub fn skills_result(name: Option<&str>, passthrough: bool, inventory: &str) -> serde_json::Value {
+pub fn skills_result(
+    name: Option<&str>,
+    passthrough: bool,
+    inventory: &str,
+    extras: &[ExtraSkill],
+) -> serde_json::Value {
     let catalog: Vec<&Skill> = if passthrough {
         vec![&SEARCH_INVOKE_SKILL]
     } else {
         vec![&EXECUTE_SKILL]
     };
     match name {
-        None | Some("") => serde_json::json!({
-            "skills": catalog.iter().map(|s| serde_json::json!({
-                "name": s.name,
-                "summary": s.summary,
-            })).collect::<Vec<_>>()
-        }),
-        Some(want) => catalog.iter().find(|s| s.name == want).map_or_else(
-            || {
-                serde_json::json!({
-                    "error": format!("unknown skill {want}"),
-                    "skills": catalog.iter().map(|s| s.name).collect::<Vec<_>>()
+        None | Some("") => {
+            let mut skills: Vec<serde_json::Value> = catalog
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "name": s.name,
+                        "summary": s.summary,
+                    })
                 })
-            },
-            |skill| {
+                .collect();
+            skills.extend(extras.iter().map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "summary": s.summary,
+                })
+            }));
+            serde_json::json!({ "skills": skills })
+        }
+        Some(want) => {
+            if let Some(skill) = catalog.iter().find(|s| s.name == want) {
                 let mut body = skill.body.to_owned();
                 if skill.name == "execute" && !inventory.is_empty() {
                     body.push_str("\n\n");
                     body.push_str(inventory);
                 }
-                serde_json::json!({ "name": skill.name, "summary": skill.summary, "body": body })
-            },
-        ),
+                return serde_json::json!({
+                    "name": skill.name,
+                    "summary": skill.summary,
+                    "body": body
+                });
+            }
+            if let Some(skill) = extras.iter().find(|s| s.name == want) {
+                return serde_json::json!({
+                    "name": skill.name,
+                    "summary": skill.summary,
+                    "body": skill.body
+                });
+            }
+            let mut names: Vec<&str> = catalog.iter().map(|s| s.name).collect();
+            names.extend(extras.iter().map(|s| s.name.as_str()));
+            serde_json::json!({
+                "error": format!("unknown skill {want}"),
+                "skills": names
+            })
+        }
     }
 }

@@ -1,5 +1,6 @@
 "use client";
 
+import { PageHeader } from "@/components/page";
 import { ErrorBlock } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
@@ -46,19 +47,18 @@ export default function AddIntegrationPage() {
   }, [kind, plugin]);
 
   return (
-    <div className="mx-auto flex w-full max-w-lg flex-col gap-6">
-      <div className="flex flex-col gap-2">
-        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
-        <p className="text-muted-foreground text-sm">
-          Isto registra uma integração Executor. Depois, conecte uma conta em
-          Conexões para o catálogo Treg usar a sua chave.
-        </p>
+    <>
+      <PageHeader
+        title={title}
+        description="Isto registra uma integração Executor. Depois, conecte uma conta em Conexões para o catálogo Treg usar a sua chave."
+      />
+      <div className="flex max-w-lg flex-col gap-6">
+        <AddForm plugin={plugin} kind={kind} />
+        <Button variant="outline" render={<Link href="/integracoes/explorar" />}>
+          Voltar à exploração
+        </Button>
       </div>
-      <AddForm plugin={plugin} kind={kind} />
-      <Button variant="outline" render={<Link href="/integracoes/explorar" />}>
-        Voltar à exploração
-      </Button>
-    </div>
+    </>
   );
 }
 

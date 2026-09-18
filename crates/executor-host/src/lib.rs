@@ -3,18 +3,24 @@
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::result_large_err)]
 
+mod artifacts;
 mod auth;
 mod bearer;
+mod billing;
+mod bundles;
 mod catalog_api;
 mod cimd;
 pub(crate) mod connections;
 mod edge;
 mod guard;
 mod http;
+mod jail;
 mod mcp;
+mod orgs;
 mod plugins;
 mod sentry;
 mod skills;
+mod spa;
 mod well_known;
 
 use std::net::SocketAddr;

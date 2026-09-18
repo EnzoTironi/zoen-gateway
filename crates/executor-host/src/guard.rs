@@ -31,6 +31,21 @@ pub fn is_public(path: &str) -> bool {
         || path == "/api/auth/device/token"
         || path == "/api/auth/device/verify"
         || path == "/api/console/bootstrap"
+        || path == "/api/arena/capabilities"
+        || path == "/api/stripe/webhook"
+}
+
+/// Static console / SPA paths served without the daemon bearer.
+#[must_use]
+pub fn is_spa_path(path: &str) -> bool {
+    !path.starts_with("/api/")
+        && path != "/mcp"
+        && !path.starts_with("/mcp/")
+        && !path.starts_with("/executions")
+        && !path.starts_with("/call/")
+        && path != "/metrics"
+        && path != "/health"
+        && !path.starts_with("/.well-known")
 }
 
 fn request_token(headers: &HeaderMap, uri: &str) -> Option<String> {
@@ -118,6 +133,7 @@ pub async fn gate(State(state): State<AppState>, request: Request, next: Next) -
     }
     if let Some(expected) = &state.auth_token
         && !is_public(&path)
+        && !(request.method() == Method::GET && is_spa_path(&path))
     {
         let presented = request_token(&headers, &uri);
         if presented.as_deref() != Some(expected.as_str()) {

@@ -19,7 +19,7 @@ use executor_catalog::CatalogService;
 use executor_core::{compile_call, resolve_invocation, unix_now_ms};
 use executor_host::{
     AppState, DEFAULT_PORT, DEFAULT_SERVICE_PORT, HostConfig, default_allowed_hosts,
-    default_console_origin, load_or_mint_auth_with, serve,
+    load_or_mint_auth_with, serve,
 };
 use executor_sdk::{
     CreateOptions, apply_config, create_executor_with_metrics, data_dir, load_jsonc,
@@ -168,7 +168,7 @@ enum Commands {
     Web {
         #[arg(long)]
         no_open: bool,
-        /// Console origin (default `EXECUTOR_CONSOLE_ORIGIN` or :43123).
+        /// Console origin (default: daemon SPA, or `EXECUTOR_CONSOLE_ORIGIN`).
         #[arg(long)]
         origin: Option<String>,
     },
@@ -182,8 +182,57 @@ enum Commands {
         #[command(subcommand)]
         cmd: ConnectionsCmd,
     },
-    /// Prepaid mock balance (micro-USD).
+    /// Prepaid balance (micro-USD).
     Balance,
+    /// Create a top-up intent (local confirm or Stripe).
+    Topup {
+        /// Amount in micro-USD (default `5_000_000` = US$ 5).
+        #[arg(long)]
+        micro: Option<i64>,
+        /// Confirm a local intent id.
+        #[arg(long)]
+        confirm: Option<String>,
+    },
+    /// Teams, convites e membros.
+    Org {
+        #[command(subcommand)]
+        cmd: OrgCmd,
+    },
+    /// Uploaded SKILL.md bundles.
+    Skills {
+        #[command(subcommand)]
+        cmd: SkillsCmd,
+    },
+    /// Vendor CLI jail (server-side).
+    Run {
+        /// Binary basename (`stripe`, `gh`, `git`).
+        binary: String,
+        /// Arguments after `--`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+        /// Provider whose connection secret is injected.
+        #[arg(long)]
+        integration: Option<String>,
+    },
+    /// Enrich Arena.
+    Arena {
+        #[command(subcommand)]
+        cmd: ArenaCmd,
+    },
+    /// Scan or upload skills / env keys.
+    Upload {
+        #[command(subcommand)]
+        cmd: UploadCmd,
+    },
+    /// Preview what `upload` would register.
+    Scan {
+        /// Directory of skills (SKILL.md).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// `.env` to scan.
+        #[arg(long)]
+        env_file: Option<PathBuf>,
+    },
     /// Team-owned relay tools.
     #[command(name = "team-tool")]
     TeamTool {
@@ -299,6 +348,71 @@ enum ConnectionsCmd {
         owner: String,
         integration: String,
         name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum OrgCmd {
+    /// List teams.
+    Ls,
+    /// Create a team (become owner).
+    Create { name: String },
+    /// Invite by e-mail.
+    Invite {
+        email: String,
+        #[arg(long)]
+        org: String,
+        #[arg(long, default_value = "member")]
+        role: String,
+    },
+    /// Accept an invite code.
+    Join { code: String },
+    /// List members.
+    Members { org: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum SkillsCmd {
+    /// List uploaded skills.
+    Ls,
+    /// Register a SKILL.md.
+    Add {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Print install files.
+    Install { slug: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum ArenaCmd {
+    /// List comparable capabilities.
+    Ls,
+    /// Run every competitor.
+    Run {
+        capability: String,
+        #[arg(long = "query", value_name = "KEY=VALUE")]
+        query: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum UploadCmd {
+    /// Register every SKILL.md under a directory.
+    Skills {
+        #[arg(long)]
+        dir: PathBuf,
+    },
+    /// Create connections from a `.env` (known keys only).
+    Env {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        select: Option<String>,
     },
 }
 
@@ -465,6 +579,20 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Commands::Catalog { cmd } => cmd_catalog(dir.as_deref(), cmd).await,
         Commands::Connections { cmd } => cmd_connections(dir.as_deref(), cmd).await,
         Commands::Balance => cmd_balance(dir.as_deref()).await,
+        Commands::Topup { micro, confirm } => cmd_topup(dir.as_deref(), micro, confirm).await,
+        Commands::Org { cmd } => cmd_org(dir.as_deref(), cmd).await,
+        Commands::Skills { cmd } => cmd_skills(dir.as_deref(), cmd).await,
+        Commands::Run {
+            binary,
+            args,
+            integration,
+        } => cmd_run(dir.as_deref(), binary, args, integration).await,
+        Commands::Arena { cmd } => cmd_arena(dir.as_deref(), cmd).await,
+        Commands::Upload { cmd } => cmd_upload(dir.as_deref(), cmd).await,
+        Commands::Scan {
+            dir: scan_dir,
+            env_file,
+        } => cmd_scan(scan_dir.as_deref(), env_file.as_deref()),
         Commands::TeamTool { cmd } => cmd_team_tool(dir.as_deref(), cmd).await,
     }
 }
@@ -1018,8 +1146,14 @@ async fn cmd_web(
     no_open: bool,
     origin: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let _daemon = daemon::ensure_daemon(dir).await?;
-    let url = origin.unwrap_or_else(default_console_origin);
+    let daemon_origin = daemon::ensure_daemon(dir).await?;
+    let url = origin
+        .or_else(|| {
+            std::env::var("EXECUTOR_CONSOLE_ORIGIN")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or(daemon_origin);
     println!("{url}");
     if !no_open {
         login::try_open(&url);
@@ -1166,6 +1300,299 @@ async fn cmd_balance(dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error
     let token = daemon::bearer_token(dir);
     let body = daemon::get_json(&origin, "/api/balance", token.as_deref()).await?;
     println!("{}", serde_json::to_string_pretty(&body)?);
+    Ok(())
+}
+
+async fn cmd_topup(
+    dir: Option<&Path>,
+    micro: Option<i64>,
+    confirm: Option<String>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    let body = if let Some(id) = confirm {
+        daemon::post_json(
+            &origin,
+            &format!("/api/balance/topup/{id}/confirm"),
+            &json!({}),
+            token.as_deref(),
+        )
+        .await?
+    } else {
+        daemon::post_json(
+            &origin,
+            "/api/balance/topup",
+            &json!({ "micro": micro.unwrap_or(5_000_000) }),
+            token.as_deref(),
+        )
+        .await?
+    };
+    println!("{}", serde_json::to_string_pretty(&body)?);
+    Ok(())
+}
+
+async fn cmd_org(
+    dir: Option<&Path>,
+    cmd: OrgCmd,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    match cmd {
+        OrgCmd::Ls => {
+            let body = daemon::get_json(&origin, "/api/orgs", token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        OrgCmd::Create { name } => {
+            let body = daemon::post_json(
+                &origin,
+                "/api/orgs",
+                &json!({ "name": name }),
+                token.as_deref(),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        OrgCmd::Invite { email, org, role } => {
+            let body = daemon::post_json(
+                &origin,
+                &format!("/api/orgs/{org}/invites"),
+                &json!({ "email": email, "role": role }),
+                token.as_deref(),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        OrgCmd::Join { code } => {
+            let body = daemon::post_json(
+                &origin,
+                "/api/orgs/join",
+                &json!({ "code": code }),
+                token.as_deref(),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        OrgCmd::Members { org } => {
+            let body = daemon::get_json(
+                &origin,
+                &format!("/api/orgs/{org}/members"),
+                token.as_deref(),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_skills(
+    dir: Option<&Path>,
+    cmd: SkillsCmd,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    match cmd {
+        SkillsCmd::Ls => {
+            let body = daemon::get_json(&origin, "/api/skills", token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        SkillsCmd::Add { slug, file, name } => {
+            let body_md = std::fs::read_to_string(&file)?;
+            let created = daemon::post_json(
+                &origin,
+                "/api/skills",
+                &json!({ "slug": slug, "name": name, "body": body_md }),
+                token.as_deref(),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&created)?);
+        }
+        SkillsCmd::Install { slug } => {
+            let body = daemon::get_json(
+                &origin,
+                &format!("/api/skills/{slug}/install"),
+                token.as_deref(),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_run(
+    dir: Option<&Path>,
+    binary: String,
+    args: Vec<String>,
+    integration: Option<String>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    let mut body = json!({ "binary": binary, "args": args });
+    if let Some(integration) = integration {
+        body["integration"] = json!(integration);
+    }
+    let out = daemon::post_json(&origin, "/api/cli/run", &body, token.as_deref()).await?;
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+async fn cmd_arena(
+    dir: Option<&Path>,
+    cmd: ArenaCmd,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    match cmd {
+        ArenaCmd::Ls => {
+            let body =
+                daemon::get_json(&origin, "/api/arena/capabilities", token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        ArenaCmd::Run { capability, query } => {
+            let query = parse_values(&query)?;
+            let body = daemon::post_json(
+                &origin,
+                "/api/arena/run",
+                &json!({ "capability": capability, "query": query }),
+                token.as_deref(),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+    }
+    Ok(())
+}
+
+fn known_env_provider(key: &str) -> Option<(&'static str, &'static str)> {
+    match key {
+        "STRIPE_KEY" | "STRIPE_API_KEY" | "STRIPE_SECRET_KEY" => Some(("stripe", "token")),
+        "GITHUB_TOKEN" | "GH_TOKEN" => Some(("github", "token")),
+        "OPENAI_API_KEY" => Some(("openai", "token")),
+        "HUNTER_API_KEY" => Some(("hunter", "token")),
+        "VERCEL_TOKEN" => Some(("vercel", "token")),
+        _ => None,
+    }
+}
+
+fn parse_env_file(
+    path: &Path,
+) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut values = BTreeMap::new();
+    for line in std::fs::read_to_string(path)?.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        values.insert(
+            key.trim().to_owned(),
+            value.trim().trim_matches('"').to_owned(),
+        );
+    }
+    Ok(values)
+}
+
+fn collect_skills(
+    dir: &Path,
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut out = Vec::new();
+    if dir.join("SKILL.md").is_file() {
+        let slug = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("skill")
+            .to_owned();
+        out.push((slug, std::fs::read_to_string(dir.join("SKILL.md"))?));
+        return Ok(out);
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let skill = entry.path().join("SKILL.md");
+        if skill.is_file() {
+            let slug = entry.file_name().to_string_lossy().into_owned();
+            out.push((slug, std::fs::read_to_string(skill)?));
+        }
+    }
+    Ok(out)
+}
+
+fn cmd_scan(
+    dir: Option<&Path>,
+    env_file: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut preview = json!({ "skills": [], "env": [] });
+    if let Some(dir) = dir {
+        preview["skills"] = json!(
+            collect_skills(dir)?
+                .into_iter()
+                .map(|(slug, _)| slug)
+                .collect::<Vec<_>>()
+        );
+    }
+    if let Some(env_file) = env_file {
+        let keys: Vec<String> = parse_env_file(env_file)?
+            .into_keys()
+            .filter(|k| known_env_provider(k).is_some())
+            .collect();
+        preview["env"] = json!(keys);
+    }
+    println!("{}", serde_json::to_string_pretty(&preview)?);
+    Ok(())
+}
+
+async fn cmd_upload(
+    dir: Option<&Path>,
+    cmd: UploadCmd,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    match cmd {
+        UploadCmd::Skills { dir: skill_dir } => {
+            for (slug, body) in collect_skills(&skill_dir)? {
+                let created = daemon::post_json(
+                    &origin,
+                    "/api/skills",
+                    &json!({ "slug": slug, "body": body }),
+                    token.as_deref(),
+                )
+                .await?;
+                println!("{}", serde_json::to_string_pretty(&created)?);
+            }
+        }
+        UploadCmd::Env { file, select } => {
+            let selected = select
+                .map(|s| {
+                    s.split(',')
+                        .map(|p| p.trim().to_ascii_lowercase())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            for (key, value) in parse_env_file(&file)? {
+                let Some((provider, field)) = known_env_provider(&key) else {
+                    continue;
+                };
+                if !selected.is_empty() && !selected.iter().any(|s| s == provider) {
+                    continue;
+                }
+                let created = daemon::post_json(
+                    &origin,
+                    "/api/connections",
+                    &json!({
+                        "integration": provider,
+                        "name": "upload",
+                        "template": "bearer",
+                        "values": { field: value },
+                    }),
+                    token.as_deref(),
+                )
+                .await?;
+                println!("{}", serde_json::to_string_pretty(&created)?);
+            }
+        }
+    }
     Ok(())
 }
 

@@ -23,11 +23,11 @@ pub fn install(
     let data = data_dir(dir);
     #[cfg(target_os = "macos")]
     {
-        return install_launchd(&exe, &data, boot);
+        install_launchd(&exe, &data, boot)
     }
     #[cfg(target_os = "windows")]
     {
-        return install_schtasks(&exe, &data, boot);
+        install_schtasks(&exe, &data, boot)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -43,11 +43,11 @@ pub fn install(
 pub fn uninstall() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(target_os = "macos")]
     {
-        return uninstall_launchd();
+        uninstall_launchd()
     }
     #[cfg(target_os = "windows")]
     {
-        return uninstall_schtasks();
+        uninstall_schtasks()
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -55,6 +55,7 @@ pub fn uninstall() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn install_systemd(
     exe: &Path,
     data: &Path,
@@ -79,6 +80,7 @@ fn install_systemd(
     Ok(())
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn uninstall_systemd() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let path = systemd_unit_path()?;
     match std::fs::remove_file(&path) {
@@ -89,6 +91,7 @@ fn uninstall_systemd() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn systemd_unit_path() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     let home = std::env::var("HOME")?;
     Ok(PathBuf::from(home).join(".config/systemd/user/executor.service"))

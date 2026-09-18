@@ -1,5 +1,6 @@
 "use client";
 
+import { PageHeader } from "@/components/page";
 import { ErrorBlock, LoadingBlock } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
@@ -133,14 +134,12 @@ export default function ResumePage() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-2xl flex-col gap-6">
-      <div className="flex flex-col gap-2">
-        <h1 className="text-2xl font-semibold tracking-tight">Retomar</h1>
-        <p className="text-muted-foreground text-sm">
-          Aprovação, OAuth ou elicitação — use os botões abaixo. Não é só um
-          link impresso no terminal.
-        </p>
-      </div>
+    <>
+      <PageHeader
+        title="Retomar"
+        description="Aprovação, OAuth ou elicitação — use os botões abaixo. Não é só um link impresso no terminal."
+      />
+      <div className="flex max-w-2xl flex-col gap-6">
       <div className="flex flex-col gap-1 rounded-lg border p-4">
         <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
           {info.kind}
@@ -210,6 +209,7 @@ export default function ResumePage() {
           {result}
         </pre>
       ) : null}
-    </div>
+      </div>
+    </>
   );
 }

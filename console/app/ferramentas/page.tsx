@@ -1,16 +1,18 @@
 "use client";
 
+import {
+  CardStack,
+  CardStackContent,
+  CardStackEntry,
+  CardStackEntryContent,
+  CardStackEntryDescription,
+  CardStackEntryField,
+  CardStackEntryTitle,
+} from "@/components/card-stack";
+import { PageHeader } from "@/components/page";
 import { EmptyBlock, ErrorBlock, LoadingBlock } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { daemon } from "@/lib/daemon";
 import { useCallback, useEffect, useState } from "react";
@@ -63,16 +65,13 @@ export default function ToolsPage() {
   }
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-2">
-        <h1 className="text-2xl font-semibold tracking-tight">Ferramentas</h1>
-        <p className="text-muted-foreground text-sm">
-          Catálogo Executor (`tools.integração.dono.conexão.ferramenta`). Itens
-          bloqueados pela política não aparecem aqui.
-        </p>
-      </div>
+    <>
+      <PageHeader
+        title="Ferramentas"
+        description="Catálogo Executor (tools.integração.dono.conexão.ferramenta). Itens bloqueados pela política não aparecem aqui."
+      />
       <form
-        className="flex flex-col gap-2 sm:flex-row"
+        className="mb-6 flex flex-col gap-2 sm:flex-row"
         onSubmit={(event) => {
           event.preventDefault();
           void load(q);
@@ -95,54 +94,59 @@ export default function ToolsPage() {
         />
       ) : null}
       {rows && rows.length > 0 ? (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Caminho</TableHead>
-              <TableHead>Descrição</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
+        <CardStack className="mb-8" searchable>
+          <CardStackContent>
             {rows.map((row) => (
-              <TableRow
+              <CardStackEntry
                 key={row.address}
-                data-state={selected === row.path ? "selected" : undefined}
-                className="cursor-pointer"
+                searchText={`${row.path} ${row.description}`}
+                className={selected === row.path ? "bg-accent/40" : undefined}
                 onClick={() => setSelected(row.path)}
               >
-                <TableCell className="font-mono text-xs">{row.path}</TableCell>
-                <TableCell>{row.description}</TableCell>
-              </TableRow>
+                <CardStackEntryContent>
+                  <CardStackEntryTitle className="font-mono text-xs">
+                    {row.path}
+                  </CardStackEntryTitle>
+                  <CardStackEntryDescription>
+                    {row.description}
+                  </CardStackEntryDescription>
+                </CardStackEntryContent>
+              </CardStackEntry>
             ))}
-          </TableBody>
-        </Table>
+          </CardStackContent>
+        </CardStack>
       ) : null}
-      <div className="flex flex-col gap-2">
-        <label className="text-sm font-medium" htmlFor="tool-path">
-          Chamar ferramenta
-        </label>
-        <Input
-          id="tool-path"
-          value={selected}
-          onChange={(event) => setSelected(event.target.value)}
-          placeholder="caminho da ferramenta"
-        />
-        <Textarea
-          value={args}
-          onChange={(event) => setArgs(event.target.value)}
-          aria-label="Argumentos JSON"
-          className="font-mono text-xs"
-          rows={6}
-        />
-        <Button type="button" className="w-fit" onClick={() => void run()}>
-          Executar
-        </Button>
-        {result ? (
-          <pre className="bg-muted max-h-72 overflow-auto rounded-md p-3 text-xs">
-            {result}
-          </pre>
-        ) : null}
-      </div>
-    </div>
+      <CardStack>
+        <CardStackContent>
+          <CardStackEntryField label="Chamar ferramenta">
+            <Input
+              id="tool-path"
+              value={selected}
+              onChange={(event) => setSelected(event.target.value)}
+              placeholder="caminho da ferramenta"
+            />
+          </CardStackEntryField>
+          <CardStackEntryField label="Argumentos JSON">
+            <Textarea
+              value={args}
+              onChange={(event) => setArgs(event.target.value)}
+              aria-label="Argumentos JSON"
+              className="font-mono text-xs"
+              rows={6}
+            />
+          </CardStackEntryField>
+          <CardStackEntry>
+            <Button type="button" onClick={() => void run()}>
+              Executar
+            </Button>
+          </CardStackEntry>
+        </CardStackContent>
+      </CardStack>
+      {result ? (
+        <pre className="bg-muted mt-6 max-h-72 overflow-auto rounded-md p-3 text-xs">
+          {result}
+        </pre>
+      ) : null}
+    </>
   );
 }

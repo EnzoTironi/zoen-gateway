@@ -1,14 +1,16 @@
 "use client";
 
-import { EmptyBlock, ErrorBlock, LoadingBlock } from "@/components/states";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+  CardStack,
+  CardStackContent,
+  CardStackEntry,
+  CardStackEntryActions,
+  CardStackEntryContent,
+  CardStackEntryDescription,
+  CardStackEntryTitle,
+} from "@/components/card-stack";
+import { PageHeader } from "@/components/page";
+import { EmptyBlock, ErrorBlock, LoadingBlock } from "@/components/states";
 import { daemon } from "@/lib/daemon";
 import Link from "next/link";
 import { useEffect, useState } from "react";
@@ -37,20 +39,17 @@ export default function SecretsPage() {
   }, []);
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-2">
-        <h1 className="text-2xl font-semibold tracking-tight">Segredos</h1>
-        <p className="text-muted-foreground text-sm">
-          Só as chaves das refs. Os valores nunca saem do cofre — nem aqui, nem
-          no MCP, nem no CLI.
-        </p>
-      </div>
+    <>
+      <PageHeader
+        title="Provedores"
+        description="Só as chaves das refs. Os valores nunca saem do cofre — nem aqui, nem no MCP, nem no CLI."
+      />
       {error ? <ErrorBlock message={error} /> : null}
       {rows === null ? <LoadingBlock /> : null}
       {rows && rows.length === 0 && !error ? (
         <EmptyBlock
           title="Nenhuma ref"
-          description="Conecte uma conta. O token é gravado como SecretRef (`token`, `api_key`)."
+          description="Conecte uma conta. O token é gravado como SecretRef (token, api_key)."
         >
           <Link className="underline-offset-4 hover:underline" href="/conexoes">
             Ir às conexões
@@ -58,32 +57,32 @@ export default function SecretsPage() {
         </EmptyBlock>
       ) : null}
       {rows && rows.length > 0 ? (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Conexão</TableHead>
-              <TableHead>Chaves</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
+        <CardStack searchable>
+          <CardStackContent>
             {rows.map((row) => (
-              <TableRow key={`${row.owner}/${row.integration}/${row.name}`}>
-                <TableCell>
-                  <Link
-                    className="underline-offset-4 hover:underline"
-                    href={`/integracoes/${row.integration}`}
-                  >
+              <CardStackEntry
+                key={`${row.owner}/${row.integration}/${row.name}`}
+                href={`/integracoes/${row.integration}`}
+                searchText={`${row.owner} ${row.integration} ${row.name} ${row.keys.join(" ")}`}
+              >
+                <CardStackEntryContent>
+                  <CardStackEntryTitle>
                     {row.owner}/{row.integration}/{row.name}
-                  </Link>
-                </TableCell>
-                <TableCell className="font-mono text-xs">
-                  {row.keys.join(", ") || "—"}
-                </TableCell>
-              </TableRow>
+                  </CardStackEntryTitle>
+                  <CardStackEntryDescription>
+                    {row.keys.join(", ") || "—"}
+                  </CardStackEntryDescription>
+                </CardStackEntryContent>
+                <CardStackEntryActions>
+                  <span className="font-mono text-[11px]">
+                    {row.keys.length} chaves
+                  </span>
+                </CardStackEntryActions>
+              </CardStackEntry>
             ))}
-          </TableBody>
-        </Table>
+          </CardStackContent>
+        </CardStack>
       ) : null}
-    </div>
+    </>
   );
 }

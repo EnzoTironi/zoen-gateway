@@ -40,7 +40,7 @@ Integration tests call [emulate](https://github.com/vercel-labs/emulate). `cargo
 
 ## Run
 
-Two processes in development: daemon on `127.0.0.1:4788`, console on `127.0.0.1:43123`.
+The daemon on `127.0.0.1:4788` serves the API **and** the embedded console (`executor web`). Optional Next chrome on `127.0.0.1:43123`.
 
 ```bash
 # daemon (CLI verbs auto-start this)
@@ -52,7 +52,7 @@ npm install
 npm run dev
 ```
 
-Then open http://127.0.0.1:43123 or run `executor web`. Copy is Portuguese (Brazil).
+Then open http://127.0.0.1:4788 (`executor web`) or the Next console at http://127.0.0.1:43123. Copy is Portuguese (Brazil). The console chrome matches the original Executor; Treg catalog, saldo, Arena, equipes, skills and artefatos sit beside it.
 
 ```bash
 executor catalog search encontrar e-mail
@@ -61,6 +61,10 @@ executor call hunter.people.email.find '{"domain":"stripe.com","full_name":"Patr
 executor connections add hunter work --value token=sk_own
 executor connections list
 executor balance
+executor topup --micro 5000000
+executor org create Acme
+executor arena run people.email.find --query domain=stripe.com --query full_name=Ada
+executor run git -- --version
 executor tools list
 executor call --help github --match list --limit 20
 executor resume --execution-id <id> --action accept
@@ -86,13 +90,22 @@ Protected routes require `Authorization: Bearer`, `x-executor-token`, `x-treg-to
 | `POST /api/oauth/clients` · `POST /api/oauth/start` | public client + PKCE |
 | `GET /api/balance` · `POST /api/balance/grant` | micro-USD ledger |
 | `GET/POST /api/team-tools` | own relay tools |
+| `GET/POST /api/overflow-relays` · `GET/POST /api/overflow` | platform overflow + opt-out |
+| `GET/POST /api/balance/topup` · `POST /api/stripe/webhook` | Stripe/local checkout |
+| `GET/POST /api/orgs` · `/join` · `/{slug}/invites` | teams + invites |
+| `GET/POST /api/skills` | SKILL.md bundles |
+| `GET/POST /api/artifacts` | named artifacts |
+| `GET /api/arena/capabilities` · `POST /api/arena/run` | Enrich Arena |
+| `GET /api/cli` · `POST /api/cli/run` | vendor CLI jail |
+| `GET/POST /call/{url}` | faithful host relay |
+| `GET /` | embedded console SPA |
 | `GET /api/console/bootstrap` | loopback UI session |
 | `POST /mcp` | Streamable HTTP MCP (`execute` / `skills` / `resume` / `catalog_*` / `connections_list`) |
 | `POST /executions` | code-mode |
 | `GET /executions/:id` | inspect pause |
 | `POST /executions/:id/resume` | approve / decline / cancel |
 
-Default data dir: `EXECUTOR_DATA_DIR` or `~/.executor`. Console origin: `EXECUTOR_CONSOLE_ORIGIN` (default `http://127.0.0.1:43123`). Point Next at a non-default daemon with `EXECUTOR_DAEMON_ORIGIN`.
+Default data dir: `EXECUTOR_DATA_DIR` or `~/.executor`. `executor web` opens the daemon SPA; set `EXECUTOR_CONSOLE_ORIGIN` to force the Next origin. Point Next at a non-default daemon with `EXECUTOR_DAEMON_ORIGIN`. Stripe Checkout is used when `STRIPE_SECRET_KEY` is set.
 
 ## Catalog seed
 
@@ -120,6 +133,6 @@ console/                 Next.js App Router + shadcn (pt-BR)
 executor-test-support    npx emulate for integration tests
 ```
 
-## Not in this cut (still on the union list)
+## Not in this cut
 
-Overflow to relay, Stripe top-up, Enrich Arena, vendor CLI jail, skills upload, orgs/invites, daemon-embedded SPA. Deno / workerd kernels stay out on purpose.
+Deno / workerd kernels stay out on purpose. Hosted `treg.to` billing, PostHog telemetry, and live Stripe HMAC verification (local checkout + optional Checkout session) are operator concerns, not missing product surfaces.

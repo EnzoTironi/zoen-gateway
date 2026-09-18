@@ -85,7 +85,8 @@ pub use secret::{SecretRef, strip_secret_refs};
 pub use store::{BlobStore, CatalogStore, MemoryCatalog};
 pub use tool::{Tool, ToolAnnotations, ToolDef, ToolListFilter};
 pub use toolkit::{
-    KV_OAUTH_CLIENTS, KV_OAUTH_SESSIONS, KV_SESSION_APPROVALS, KV_SUBJECTS, KV_TOOLKITS,
-    LOCAL_SUBJECT, Toolkit, ToolkitPolicy,
+    KV_ARENA_VOTES, KV_ARTIFACTS, KV_INVITES, KV_MEMBERSHIPS, KV_OAUTH_CLIENTS, KV_OAUTH_SESSIONS,
+    KV_ORGS, KV_SESSION_APPROVALS, KV_SKILLS, KV_SUBJECTS, KV_TOOLKITS, LOCAL_SUBJECT, Toolkit,
+    ToolkitPolicy,
 };
 pub use www_authenticate::{AuthChallenge, parse_challenges};

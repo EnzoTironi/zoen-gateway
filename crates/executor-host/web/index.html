@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>executor</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #111111;
+        --muted: #666666;
+        --line: #eaeaea;
+        --card: #ffffff;
+        --accent: #f5f5f5;
+        --sidebar: #ffffff;
+        --sidebar-fg: #666666;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0a0a0a;
+          --fg: #ededed;
+          --muted: #9a9a9a;
+          --line: #1f1f1f;
+          --card: #0f0f0f;
+          --accent: #1a1a1a;
+          --sidebar: #0a0a0a;
+          --sidebar-fg: #9a9a9a;
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        font: 14px/1.45 ui-sans-serif, system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+      }
+      .shell { display: flex; min-height: 100vh; }
+      aside {
+        width: 224px;
+        border-right: 1px solid var(--line);
+        background: var(--sidebar);
+        display: flex;
+        flex-direction: column;
+      }
+      .brand {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        height: 48px;
+        padding: 0 16px;
+        border-bottom: 1px solid var(--line);
+      }
+      .brand strong {
+        font: 500 14px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        letter-spacing: -0.02em;
+      }
+      .brand span {
+        font: 500 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      nav { padding: 8px; flex: 1; }
+      nav a {
+        display: block;
+        color: var(--sidebar-fg);
+        text-decoration: none;
+        padding: 6px 10px;
+        border-radius: 6px;
+        font-size: 14px;
+      }
+      nav a[aria-current="page"], nav a:hover {
+        background: var(--accent);
+        color: var(--fg);
+      }
+      main { flex: 1; overflow: auto; }
+      .page { max-width: 896px; margin: 0 auto; padding: 40px 24px 56px; }
+      h1 {
+        font-size: 2rem;
+        letter-spacing: -0.03em;
+        line-height: 1;
+        font-weight: 600;
+        margin: 0;
+      }
+      .lede { color: var(--muted); margin: 8px 0 32px; max-width: 42rem; }
+      p, .muted { color: var(--muted); }
+      button, input, textarea, select {
+        font: inherit;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--card);
+        color: inherit;
+      }
+      button { cursor: pointer; }
+      button.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+      pre {
+        background: var(--accent);
+        border: 1px solid var(--line);
+        padding: 12px;
+        overflow: auto;
+        border-radius: 8px;
+        font-size: 12px;
+      }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+      .stack {
+        border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+        border-radius: 8px;
+        overflow: hidden;
+        background: var(--card);
+      }
+      .entry {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 16px;
+        border-top: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+      }
+      .entry:first-child { border-top: 0; }
+      .entry strong { display: block; font-size: 14px; }
+      .entry .sub { font-size: 12px; color: var(--muted); }
+      .grow { flex: 1; min-width: 0; }
+      .empty {
+        border: 1px dashed var(--line);
+        border-radius: 16px;
+        padding: 64px 24px;
+        text-align: center;
+        color: var(--muted);
+      }
+      label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+      .glyph {
+        width: 32px; height: 32px; border-radius: 6px;
+        background: var(--accent); color: var(--muted);
+        display: flex; align-items: center; justify-content: center;
+        font-size: 12px; font-weight: 600; flex-shrink: 0;
+      }
+      @media (max-width: 720px) {
+        .shell { flex-direction: column; }
+        aside { width: 100%; border-right: 0; border-bottom: 1px solid var(--line); }
+        nav { display: flex; flex-wrap: wrap; gap: 4px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <aside>
+        <div class="brand"><strong>executor</strong><span>beta</span></div>
+        <nav id="nav"></nav>
+      </aside>
+      <main><div class="page" id="app">Carregando…</div></main>
+    </div>
+    <script>
+      const pages = [
+        ["/", "Integrações"],
+        ["/catalogo", "Catálogo"],
+        ["/saldo", "Saldo"],
+        ["/arena", "Arena"],
+        ["/equipes", "Equipes"],
+        ["/skills", "Skills"],
+        ["/artefatos", "Artefatos"],
+        ["/cli", "CLI jail"],
+      ];
+      let token = null;
+      async function boot() {
+        const res = await fetch("/api/console/bootstrap");
+        const body = res.ok ? await res.json() : {};
+        token = body.token;
+        route();
+      }
+      function headers(json) {
+        const h = {};
+        if (json) h["content-type"] = "application/json";
+        if (token) {
+          h.authorization = "Bearer " + token;
+          h["x-treg-token"] = token;
+        }
+        return h;
+      }
+      async function api(path, init = {}) {
+        const res = await fetch(path, { ...init, headers: { ...headers(!!init.body), ...init.headers } });
+        const text = await res.text();
+        let data = text;
+        try { data = text ? JSON.parse(text) : null; } catch {}
+        if (!res.ok) throw new Error((data && (data.message || data.error)) || text || res.statusText);
+        return data;
+      }
+      function nav(path) {
+        return pages.map(([href, label]) =>
+          `<a href="${href}" ${href === path || (href !== "/" && path.startsWith(href)) ? 'aria-current="page"' : ""}>${label}</a>`
+        ).join("");
+      }
+      function escapeHtml(s) {
+        return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+      }
+      function header(title, lede) {
+        return `<h1>${title}</h1><p class="lede">${lede}</p>`;
+      }
+      function stack(rows) {
+        if (!rows.length) return `<div class="empty">Nada aqui ainda</div>`;
+        return `<div class="stack">${rows.join("")}</div>`;
+      }
+      function entry(glyph, title, sub, extra) {
+        return `<div class="entry"><div class="glyph">${escapeHtml(glyph)}</div><div class="grow"><strong>${escapeHtml(title)}</strong><div class="sub">${escapeHtml(sub)}</div></div>${extra || ""}</div>`;
+      }
+      async function render(path) {
+        document.getElementById("nav").innerHTML = nav(path);
+        const app = document.getElementById("app");
+        try {
+          if (path === "/catalogo") {
+            const q = new URLSearchParams(location.search).get("q") || "e-mail";
+            const data = await api("/api/catalog?q=" + encodeURIComponent(q));
+            const items = data.items || [];
+            app.innerHTML = header("Catálogo", "Busca por trabalho, não por fornecedor.") +
+              `<form class="row" onsubmit="event.preventDefault(); location.search='?q='+encodeURIComponent(this.q.value)">
+                <input name="q" value="${escapeHtml(q)}" aria-label="Busca" />
+                <button class="primary" type="submit">Buscar</button>
+              </form>` +
+              stack(items.map((hit) => {
+                const ep = hit.endpoint || hit;
+                return entry((ep.provider || "?").slice(0,1).toUpperCase(), ep.name || ep.id, `${ep.provider || ""} · ${ep.id || ""}`);
+              }));
+            return;
+          }
+          if (path === "/saldo") {
+            const data = await api("/api/balance");
+            const money = (data.balance_micro/1e6).toLocaleString("pt-BR", { style: "currency", currency: "USD" });
+            app.innerHTML = header("Saldo", "Ledger em micro-USD. Sem Stripe o checkout confirma localmente.") +
+              stack([entry("$", money, "sujeito " + (data.subject || ""),
+                `<div class="row" style="margin:0"><button class="primary" id="topup">Checkout US$ 5,00</button><button id="grant">Crédito US$ 1,00</button></div>`
+              )]) + `<pre id="out" hidden></pre>`;
+            document.getElementById("grant").onclick = async () => {
+              await api("/api/balance/grant", { method: "POST", body: JSON.stringify({ micro: 1000000 }) });
+              route();
+            };
+            document.getElementById("topup").onclick = async () => {
+              const out = await api("/api/balance/topup", { method: "POST", body: JSON.stringify({ micro: 5000000 }) });
+              const el = document.getElementById("out");
+              el.hidden = false;
+              el.textContent = JSON.stringify(out, null, 2);
+              if (out.mode === "local") {
+                await api(out.confirm_url, { method: "POST", body: "{}" });
+                route();
+              } else if (out.checkout_url) location.href = out.checkout_url;
+            };
+            return;
+          }
+          if (path === "/arena") {
+            const caps = await api("/api/arena/capabilities");
+            const list = (caps.capabilities || []).map((c) => c.capability).join(", ") || "nenhuma";
+            app.innerHTML = header("Enrich Arena", "Compare provedores da mesma capacidade.") +
+              `<p class="muted">Capacidades: ${escapeHtml(list)}</p>
+              <div class="row">
+                <input id="cap" value="people.email.find" aria-label="Capacidade" />
+                <input id="domain" value="stripe.com" aria-label="Domínio" />
+                <button class="primary" id="run">Correr</button>
+              </div>
+              <div id="out"></div>`;
+            document.getElementById("run").onclick = async () => {
+              const out = await api("/api/arena/run", {
+                method: "POST",
+                body: JSON.stringify({
+                  capability: document.getElementById("cap").value,
+                  query: { domain: document.getElementById("domain").value, full_name: "Patrick Collison" },
+                }),
+              });
+              document.getElementById("out").innerHTML = stack((out.results || []).map((row) =>
+                entry((row.provider || "?").slice(0,1).toUpperCase(), row.provider, row.id + " · " + (row.ms ?? "—") + " ms")
+              ));
+            };
+            return;
+          }
+          if (path === "/equipes") {
+            const data = await api("/api/orgs");
+            const orgs = data.orgs || [];
+            app.innerHTML = header("Equipes", "Até 10 equipes próprias.") +
+              stack(orgs.map((org) => entry((org.name || "?").slice(0,1).toUpperCase(), org.name, org.slug + " · " + org.owner))) +
+              `<div class="row"><input id="name" placeholder="Nome da equipe" /><button class="primary" id="create">Criar</button></div>`;
+            document.getElementById("create").onclick = async () => {
+              await api("/api/orgs", { method: "POST", body: JSON.stringify({ name: document.getElementById("name").value }) });
+              route();
+            };
+            return;
+          }
+          if (path === "/skills") {
+            const data = await api("/api/skills");
+            const skills = data.skills || [];
+            app.innerHTML = header("Skills", "Pacote SKILL.md compartilhado.") +
+              stack(skills.map((row) => entry((row.slug || "?").slice(0,1).toUpperCase(), row.name || row.slug, row.slug))) +
+              `<label>slug</label><input id="slug" value="demo-skill" />
+              <label>SKILL.md</label><textarea id="body" rows="6"># Demo\n\nReceita compartilhada.</textarea>
+              <div class="row"><button class="primary" id="add">Registrar</button></div>`;
+            document.getElementById("add").onclick = async () => {
+              await api("/api/skills", { method: "POST", body: JSON.stringify({
+                slug: document.getElementById("slug").value,
+                body: document.getElementById("body").value,
+              }) });
+              route();
+            };
+            return;
+          }
+          if (path === "/artefatos") {
+            const data = await api("/api/artifacts");
+            const arts = data.artifacts || [];
+            app.innerHTML = header("Artefatos", "Notas e saídas persistidas no daemon.") +
+              stack(arts.map((row) => entry((row.name || "?").slice(0,1).toUpperCase(), row.name, row.kind))) +
+              `<div class="row"><input id="name" placeholder="nota.md" /><button class="primary" id="add">Guardar</button></div>`;
+            document.getElementById("add").onclick = async () => {
+              await api("/api/artifacts", { method: "POST", body: JSON.stringify({
+                name: document.getElementById("name").value || "nota.md",
+                body: "olá",
+              }) });
+              route();
+            };
+            return;
+          }
+          if (path === "/cli") {
+            const data = await api("/api/cli");
+            app.innerHTML = header("CLI jail", "Binários da allowlist, sem shell, credencial injetada no servidor.") +
+              `<pre>${escapeHtml(JSON.stringify(data, null, 2))}</pre>
+              <div class="row">
+                <input id="bin" value="git" />
+                <input id="args" value="--version" />
+                <button class="primary" id="run">Rodar no servidor</button>
+              </div>
+              <pre id="out"></pre>`;
+            document.getElementById("run").onclick = async () => {
+              const out = await api("/api/cli/run", {
+                method: "POST",
+                body: JSON.stringify({
+                  binary: document.getElementById("bin").value,
+                  args: document.getElementById("args").value.split(/\s+/).filter(Boolean),
+                }),
+              });
+              document.getElementById("out").textContent = JSON.stringify(out, null, 2);
+            };
+            return;
+          }
+          const boot = await api("/api/console/bootstrap");
+          const integrations = await api("/api/integrations").catch(() => ({ integrations: [] }));
+          const rows = integrations.integrations || [];
+          app.innerHTML = header("Integrações", "Provedores de ferramenta neste workspace.") +
+            `<div class="stack">
+              <div class="entry"><div class="grow"><strong>Conectar um agente</strong>
+              <div class="sub">Cole isto no Cursor, Claude Code ou qualquer cliente MCP.</div>
+              <pre style="margin:12px 0 0">npx add-mcp ${escapeHtml(boot.mcp_url || "")} --transport http --name executor --header "Authorization: Bearer ${escapeHtml(boot.token || "")}"</pre></div></div>
+            </div>
+            <div style="height:24px"></div>` +
+            (rows.length
+              ? stack(rows.map((row) => entry((row.name || row.slug || "?").slice(0,1).toUpperCase(), row.name || row.slug, row.slug)))
+              : `<div class="empty">Nenhuma integração ainda</div>`) +
+            `<p class="muted">${boot.catalog_size || 0} endpoints no catálogo · locale ${escapeHtml(boot.locale || "pt-BR")}</p>`;
+        } catch (err) {
+          app.innerHTML = header("Erro", escapeHtml(err.message));
+        }
+      }
+      function route() {
+        render(location.pathname);
+      }
+      window.addEventListener("popstate", route);
+      document.addEventListener("click", (event) => {
+        const a = event.target.closest("a");
+        if (a && a.origin === location.origin && a.getAttribute("href").startsWith("/")) {
+          event.preventDefault();
+          history.pushState({}, "", a.getAttribute("href"));
+          route();
+        }
+      });
+      boot();
+    </script>
+  </body>
+</html>

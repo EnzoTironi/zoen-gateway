@@ -11,6 +11,7 @@ import {
 } from "@/components/card-stack";
 import { PageHeader } from "@/components/page";
 import { EmptyBlock, ErrorBlock, LoadingBlock } from "@/components/states";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -27,41 +28,42 @@ import { daemon } from "@/lib/daemon";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
-type PolicyRow = {
-  id: string;
-  owner: string;
-  pattern: string;
-  action: "approve" | "require_approval" | "block";
+type ToolkitRow = {
+  slug: string;
+  name: string;
+  connections?: string[];
 };
 
-function actionLabel(action: PolicyRow["action"]): string {
-  switch (action) {
-    case "approve":
-      return "aprovar";
-    case "require_approval":
-      return "exigir aprovação";
-    case "block":
-      return "bloquear";
-    default: {
-      const _exhaustive: never = action;
-      return _exhaustive;
-    }
+function asToolkit(value: unknown): ToolkitRow | null {
+  if (!value || typeof value !== "object") {
+    return null;
   }
+  const row = value as { slug?: unknown; name?: unknown; connections?: unknown };
+  if (typeof row.slug !== "string") {
+    return null;
+  }
+  return {
+    slug: row.slug,
+    name: typeof row.name === "string" ? row.name : row.slug,
+    connections: Array.isArray(row.connections)
+      ? row.connections.filter((item): item is string => typeof item === "string")
+      : [],
+  };
 }
 
-export default function PoliciesPage() {
-  const [rows, setRows] = useState<PolicyRow[] | null>(null);
+export default function ToolkitsPage() {
+  const [rows, setRows] = useState<ToolkitRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const body = await daemon<{ policies: PolicyRow[] }>("/api/policies");
-      setRows(body.policies);
+      const body = await daemon<{ toolkits: unknown[] }>("/api/toolkits");
+      setRows((body.toolkits ?? []).map(asToolkit).filter((row): row is ToolkitRow => row !== null));
       setError(null);
     } catch (err) {
       setRows([]);
-      setError(err instanceof Error ? err.message : "Falha ao listar políticas");
+      setError(err instanceof Error ? err.message : "Falha ao listar toolkits");
     }
   }, []);
 
@@ -69,10 +71,10 @@ export default function PoliciesPage() {
     void load();
   }, [load]);
 
-  async function remove(id: string) {
+  async function remove(slug: string) {
     try {
-      await daemon(`/api/policies/${id}`, { method: "DELETE" });
-      toast.success("Política removida");
+      await daemon(`/api/toolkits/${slug}`, { method: "DELETE" });
+      toast.success("Toolkit removido");
       await load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Não removeu");
@@ -82,11 +84,11 @@ export default function PoliciesPage() {
   return (
     <>
       <PageHeader
-        title="Políticas"
-        description="Org é a camada de fora: um block externo não pode ser enfraquecido por um approve interno."
+        title="Toolkits"
+        description="Superfície MCP recortada em /mcp/toolkits/:slug. Cada toolkit expõe só as conexões que você listar."
         actions={
           <Button type="button" size="sm" onClick={() => setOpen(true)}>
-            Nova política
+            Novo toolkit
           </Button>
         }
       />
@@ -94,11 +96,11 @@ export default function PoliciesPage() {
       {rows === null ? <LoadingBlock /> : null}
       {rows && rows.length === 0 && !error ? (
         <EmptyBlock
-          title="Nenhuma política"
-          description="Sem regras, vale o padrão do plugin (requiresApproval). Crie um padrão como github.*.*.repos.*."
+          title="Nenhum toolkit"
+          description="Crie um recorte para um agente que não deve ver o catálogo inteiro."
         >
           <Button type="button" size="sm" onClick={() => setOpen(true)}>
-            Criar política
+            Criar toolkit
           </Button>
         </EmptyBlock>
       ) : null}
@@ -107,23 +109,24 @@ export default function PoliciesPage() {
           <CardStackContent>
             {rows.map((row) => (
               <CardStackEntry
-                key={row.id}
-                searchText={`${row.pattern} ${row.action} ${row.owner}`}
+                key={row.slug}
+                searchText={`${row.name} ${row.slug} ${(row.connections ?? []).join(" ")}`}
               >
                 <CardStackEntryContent>
-                  <CardStackEntryTitle className="font-mono text-xs">
-                    {row.pattern}
-                  </CardStackEntryTitle>
-                  <CardStackEntryDescription>
-                    {actionLabel(row.action)} · {row.owner}
-                  </CardStackEntryDescription>
+                  <CardStackEntryTitle>{row.name}</CardStackEntryTitle>
+                  <CardStackEntryDescription>{row.slug}</CardStackEntryDescription>
                 </CardStackEntryContent>
                 <CardStackEntryActions>
+                  {(row.connections ?? []).map((connection) => (
+                    <Badge key={connection} variant="outline">
+                      {connection}
+                    </Badge>
+                  ))}
                   <Button
                     type="button"
                     variant="destructive"
                     size="sm"
-                    onClick={() => void remove(row.id)}
+                    onClick={() => void remove(row.slug)}
                   >
                     Remover
                   </Button>
@@ -133,7 +136,7 @@ export default function PoliciesPage() {
           </CardStackContent>
         </CardStack>
       ) : null}
-      <CreatePolicyDialog
+      <CreateToolkitDialog
         open={open}
         onOpenChange={setOpen}
         onCreated={() => {
@@ -145,7 +148,7 @@ export default function PoliciesPage() {
   );
 }
 
-function CreatePolicyDialog({
+function CreateToolkitDialog({
   open,
   onOpenChange,
   onCreated,
@@ -154,18 +157,26 @@ function CreatePolicyDialog({
   onOpenChange: (open: boolean) => void;
   onCreated: () => void;
 }) {
-  const [pattern, setPattern] = useState("*");
-  const [action, setAction] = useState<PolicyRow["action"]>("require_approval");
+  const [slug, setSlug] = useState("equipe");
+  const [name, setName] = useState("Equipe");
+  const [connections, setConnections] = useState("*");
   const [busy, setBusy] = useState(false);
 
   async function submit() {
     setBusy(true);
     try {
-      await daemon("/api/policies", {
+      await daemon("/api/toolkits", {
         method: "POST",
-        body: JSON.stringify({ pattern, action }),
+        body: JSON.stringify({
+          slug,
+          name,
+          connections: connections
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean),
+        }),
       });
-      toast.success("Política criada");
+      toast.success("Toolkit criado");
       onCreated();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Não criou");
@@ -178,36 +189,38 @@ function CreatePolicyDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Nova política</DialogTitle>
+          <DialogTitle>Novo toolkit</DialogTitle>
           <DialogDescription>
-            Padrões: `*` (tudo), `github.*` (subárvore), `github.*.*.repos.list`
-            (um segmento).
+            O slug vira o caminho /mcp/toolkits/&lt;slug&gt;. Conexões aceitam
+            globs separados por vírgula (* ou github.local.work).
           </DialogDescription>
         </DialogHeader>
         <FieldGroup>
           <Field>
-            <FieldLabel htmlFor="pat">Padrão</FieldLabel>
+            <FieldLabel htmlFor="tk-slug">Slug</FieldLabel>
             <Input
-              id="pat"
-              value={pattern}
-              onChange={(event) => setPattern(event.target.value)}
+              id="tk-slug"
+              value={slug}
+              onChange={(event) => setSlug(event.target.value)}
               required
             />
           </Field>
           <Field>
-            <FieldLabel htmlFor="act">Ação</FieldLabel>
-            <select
-              id="act"
-              className="border-input h-9 rounded-md border bg-transparent px-3 text-sm"
-              value={action}
-              onChange={(event) =>
-                setAction(event.target.value as PolicyRow["action"])
-              }
-            >
-              <option value="approve">aprovar</option>
-              <option value="require_approval">exigir aprovação</option>
-              <option value="block">bloquear</option>
-            </select>
+            <FieldLabel htmlFor="tk-name">Nome</FieldLabel>
+            <Input
+              id="tk-name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              required
+            />
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="tk-conn">Conexões</FieldLabel>
+            <Input
+              id="tk-conn"
+              value={connections}
+              onChange={(event) => setConnections(event.target.value)}
+            />
           </Field>
         </FieldGroup>
         <DialogFooter>
