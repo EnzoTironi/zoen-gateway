@@ -853,7 +853,8 @@ mod tests {
                 .to_vec(),
         )
         .unwrap();
-        assert!(html.contains("Executor"), "{html}");
+        assert!(html.contains("<strong>executor</strong>"), "{html}");
+        assert!(html.contains("class=\"stack\""), "{html}");
 
         let res = app
             .clone()
