@@ -430,14 +430,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "executor-catalog"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "executor-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "executor-catalog",
  "executor-core",
  "executor-engine",
  "executor-host",
  "executor-sdk",
+ "executor-storage",
  "executor-test-support",
  "reqwest",
  "serde",
@@ -503,14 +522,17 @@ name = "executor-host"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "executor-catalog",
  "executor-core",
  "executor-engine",
  "getrandom 0.2.17",
+ "hex",
  "http-body-util",
  "parking_lot",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tower",
@@ -578,6 +600,7 @@ dependencies = [
  "executor-storage",
  "executor-test-support",
  "reqwest",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-util",

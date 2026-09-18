@@ -319,8 +319,25 @@ async fn dispatch(
         ));
     }
     if path == "search" {
-        let query = args.get("query").and_then(Value::as_str).unwrap_or("");
-        return match host.search(query).await {
+        return match host.search(&args).await {
+            Ok(value) => ok_json(&value),
+            Err(err) => fail_json(&err.to_string()),
+        };
+    }
+    if path == "describe.tool" {
+        let Some(tool_path) = args.get("path").and_then(Value::as_str) else {
+            return fail_json("tools.describe.tool expects an object: { path: string }");
+        };
+        if args.get("includeSchemas").is_some() {
+            return fail_json("tools.describe.tool no longer accepts includeSchemas");
+        }
+        return match host.describe_tool(tool_path).await {
+            Ok(value) => ok_json(&value),
+            Err(err) => fail_json(&err.to_string()),
+        };
+    }
+    if path == "executor.integrations.list" {
+        return match host.list_sandbox_integrations(&args).await {
             Ok(value) => ok_json(&value),
             Err(err) => fail_json(&err.to_string()),
         };
@@ -375,8 +392,8 @@ mod tests {
             })
         }
 
-        async fn search(&self, query: &str) -> Result<Value, CodeError> {
-            Ok(json!([{"query": query}]))
+        async fn search(&self, args: &Value) -> Result<Value, CodeError> {
+            Ok(json!([{"query": args.get("query").and_then(Value::as_str).unwrap_or("")}]))
         }
     }
 
@@ -394,9 +411,9 @@ mod tests {
             })
         }
 
-        async fn search(&self, query: &str) -> Result<Value, CodeError> {
+        async fn search(&self, args: &Value) -> Result<Value, CodeError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(json!([{"query": query}]))
+            Ok(json!([{"query": args.get("query").and_then(Value::as_str).unwrap_or("")}]))
         }
     }
 
@@ -419,7 +436,7 @@ mod tests {
             })
         }
 
-        async fn search(&self, _query: &str) -> Result<Value, CodeError> {
+        async fn search(&self, _args: &Value) -> Result<Value, CodeError> {
             Err(CodeError::new("no search"))
         }
     }

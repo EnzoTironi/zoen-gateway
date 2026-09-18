@@ -4,15 +4,20 @@
 
 #![allow(clippy::module_name_repetitions)] // `SqliteCatalog` is the crate's one type.
 
+mod lock;
+
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use executor_core::{
     CatalogStore, Connection, ConnectionRef, ExecutionId, ExecutionState, IntegrationRecord,
-    IntegrationSlug, Owner, PolicyId, StorageError, Tool, ToolAddress, ToolPolicy,
+    IntegrationSlug, KV_OAUTH_CLIENTS, KV_OAUTH_SESSIONS, KV_SUBJECTS, Owner, PolicyId,
+    StorageError, Tool, ToolAddress, ToolPolicy,
 };
 use parking_lot::Mutex;
 use rusqlite::{Connection as SqlConn, OptionalExtension, params};
+
+pub use lock::DataDirLock;
 
 const SCHEMA: &str = "
 PRAGMA journal_mode=WAL;
@@ -51,6 +56,28 @@ CREATE TABLE IF NOT EXISTS executions (
 CREATE TABLE IF NOT EXISTS idempotency (
   key TEXT PRIMARY KEY,
   execution_id TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS kv (
+  collection TEXT NOT NULL,
+  id TEXT NOT NULL,
+  body TEXT NOT NULL,
+  PRIMARY KEY (collection, id)
+);
+CREATE TABLE IF NOT EXISTS oauth_client (
+  id TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  body TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS oauth_session (
+  state TEXT PRIMARY KEY,
+  body TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS subject (
+  external_id TEXT PRIMARY KEY,
+  last_seen_at INTEGER,
+  status TEXT,
+  body TEXT NOT NULL
 );
 ";
 
@@ -409,6 +436,134 @@ impl CatalogStore for SqliteCatalog {
             }
         })
     }
+
+    fn put_kv(
+        &self,
+        collection: &str,
+        id: &str,
+        body: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let text = serde_json::to_string(&body).map_err(|e| StorageError::new(e.to_string()))?;
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO kv(collection, id, body) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(collection, id) DO UPDATE SET body=excluded.body",
+                params![collection, id, text],
+            )?;
+            dual_write_sql(c, collection, id, &body, &text)?;
+            Ok(())
+        })
+    }
+
+    fn get_kv(
+        &self,
+        collection: &str,
+        id: &str,
+    ) -> Result<Option<serde_json::Value>, StorageError> {
+        self.with(|c| {
+            let body: Option<String> = c
+                .query_row(
+                    "SELECT body FROM kv WHERE collection=?1 AND id=?2",
+                    params![collection, id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match body {
+                None => Ok(None),
+                Some(b) => Ok(Some(serde_json::from_str(&b).map_err(json_err)?)),
+            }
+        })
+    }
+
+    fn list_kv(&self, collection: &str) -> Result<Vec<serde_json::Value>, StorageError> {
+        self.with(|c| {
+            let mut stmt = c.prepare("SELECT body FROM kv WHERE collection=?1")?;
+            let rows = stmt.query_map(params![collection], |r| r.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(serde_json::from_str(&row?).map_err(json_err)?);
+            }
+            Ok(out)
+        })
+    }
+
+    fn delete_kv(&self, collection: &str, id: &str) -> Result<bool, StorageError> {
+        self.with(|c| {
+            let n = c.execute(
+                "DELETE FROM kv WHERE collection=?1 AND id=?2",
+                params![collection, id],
+            )?;
+            dual_delete_sql(c, collection, id)?;
+            Ok(n > 0)
+        })
+    }
+}
+
+fn owner_slug(id: &str) -> (String, String) {
+    id.split_once(':').map_or_else(
+        || ("org".into(), id.to_owned()),
+        |(owner, slug)| (owner.to_owned(), slug.to_owned()),
+    )
+}
+
+fn dual_write_sql(
+    conn: &SqlConn,
+    collection: &str,
+    id: &str,
+    body: &serde_json::Value,
+    text: &str,
+) -> Result<(), rusqlite::Error> {
+    match collection {
+        KV_OAUTH_CLIENTS => {
+            let (owner, slug) = owner_slug(id);
+            conn.execute(
+                "INSERT INTO oauth_client(id, owner, slug, body) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(id) DO UPDATE SET owner=excluded.owner, slug=excluded.slug, body=excluded.body",
+                params![id, owner, slug, text],
+            )?;
+        }
+        KV_OAUTH_SESSIONS => {
+            conn.execute(
+                "INSERT INTO oauth_session(state, body) VALUES (?1, ?2)
+                 ON CONFLICT(state) DO UPDATE SET body=excluded.body",
+                params![id, text],
+            )?;
+        }
+        KV_SUBJECTS => {
+            let seen = body
+                .get("last_seen_at")
+                .and_then(serde_json::Value::as_i64)
+                .or_else(|| {
+                    body.get("last_seen_at")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|v| i64::try_from(v).ok())
+                });
+            let status = body.get("status").and_then(serde_json::Value::as_str);
+            conn.execute(
+                "INSERT INTO subject(external_id, last_seen_at, status, body) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(external_id) DO UPDATE SET last_seen_at=excluded.last_seen_at, status=excluded.status, body=excluded.body",
+                params![id, seen, status, text],
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn dual_delete_sql(conn: &SqlConn, collection: &str, id: &str) -> Result<(), rusqlite::Error> {
+    match collection {
+        KV_OAUTH_CLIENTS => {
+            conn.execute("DELETE FROM oauth_client WHERE id=?1", params![id])?;
+        }
+        KV_OAUTH_SESSIONS => {
+            conn.execute("DELETE FROM oauth_session WHERE state=?1", params![id])?;
+        }
+        KV_SUBJECTS => {
+            conn.execute("DELETE FROM subject WHERE external_id=?1", params![id])?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -439,5 +594,51 @@ mod tests {
         assert_eq!(got.integration.name, "Petstore");
         assert!(db.remove_integration(&slug).unwrap());
         assert!(db.get_integration(&slug).unwrap().is_none());
+    }
+
+    #[test]
+    fn oauth_and_subject_dual_write_sql_tables() {
+        use executor_core::{CatalogStore, KV_OAUTH_CLIENTS, KV_OAUTH_SESSIONS, KV_SUBJECTS};
+        use rusqlite::Connection;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.db");
+        let db = SqliteCatalog::open(&path, 2).unwrap();
+        db.put_kv(
+            KV_OAUTH_CLIENTS,
+            "org:demo",
+            serde_json::json!({"slug":"demo","clientId":"cid"}),
+        )
+        .unwrap();
+        db.put_kv(
+            KV_OAUTH_SESSIONS,
+            "st_1",
+            serde_json::json!({"state":"st_1","verifier":"v"}),
+        )
+        .unwrap();
+        db.put_kv(
+            KV_SUBJECTS,
+            "local",
+            serde_json::json!({"external_id":"local","last_seen_at": 1, "status":"active"}),
+        )
+        .unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let clients: i64 = conn
+            .query_row("SELECT COUNT(*) FROM oauth_client", [], |r| r.get(0))
+            .unwrap();
+        let sessions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM oauth_session", [], |r| r.get(0))
+            .unwrap();
+        let subjects: i64 = conn
+            .query_row("SELECT COUNT(*) FROM subject", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(clients, 1);
+        assert_eq!(sessions, 1);
+        assert_eq!(subjects, 1);
+        db.delete_kv(KV_OAUTH_CLIENTS, "org:demo").unwrap();
+        let clients: i64 = conn
+            .query_row("SELECT COUNT(*) FROM oauth_client", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(clients, 0);
     }
 }

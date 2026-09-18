@@ -1,30 +1,34 @@
-# Executor (Rust)
+# Executor ∪ Treg (Rust)
 
-A Rust port of [UsefulSoftwareCo/executor](https://github.com/UsefulSoftwareCo/executor): the integration layer for agents. One catalog of tools, credentials, and policy.
+One process, one token, two superpowers:
 
-The floor is a single verb — `execute(path, args)` — plus the catalog that makes that verb safe under load.
+1. **[Executor](https://github.com/UsefulSoftwareCo/executor/)** — configure integrations once (OpenAPI, GraphQL, MCP, Google Discovery), connections, org-outer policy, QuickJS code-mode, MCP `execute` / `skills` / `resume`.
+2. **[Treg](https://github.com/superdesigndev/treg)** — search tools by **job**, priced catalog calls, credential ladder (your key always wins and is never metered), team tools, prepaid micro-USD.
+
+This repository is the union in Rust. The Python/TS trees are reference only (not vendored). Live `treg.to` is not required: the bundled seed catalog and in-memory ledger are the self-host default.
+
+The floor is still `execute(path, args)`. Treg adds `/call` by endpoint id. Secrets never appear in tool I/O.
 
 ## What you can do
 
 - Register OpenAPI / Swagger / Google Discovery specs, GraphQL endpoints, and MCP servers
 - Bind connections (credentials live behind `SecretRef`; agents never see values)
 - Gate tools with org-outer policy (`approve` / `require_approval` / `block`)
-- Call tools from the CLI, an in-process SDK, a loopback HTTP daemon, or MCP stdio
-- Run bounded code-mode scripts (`return await tools["path"](args)` natively, or real JS in in-process QuickJS)
-- Device-login (`login` / `logout` / `whoami`) and named server profiles
-- Encrypt the default secret store at rest (`EXS1` ChaCha20-Poly1305 box)
-- Enterprise-managed MCP authorization (ID-JAG) when the Resource AS advertises the profile
-- Optional Sentry envelopes (`SENTRY_DSN`); Cloudflare fetch-proxy Worker (`wrangler.toml`)
+- Search the priced catalog by job (`encontrar e-mail`) and call with the credential ladder
+- Use one daemon bearer as the local “one token” (`Authorization` or `X-Treg-Token`)
+- Call from the CLI, in-process SDK, loopback HTTP daemon, MCP, or the **pt-BR console**
+- Resume approvals / OAuth pauses in the console (`/resume/{id}`), not URL-print-only
+- Run bounded code-mode (`return await tools["path"](args)` natively, or in-process QuickJS)
 
 ## Production bar
 
-The runtime is built as if it will serve more than one million people: bounded in-flight executes (fail-fast overload, no unbounded queue), deadlines, cancellation, WAL SQLite with a connection pool, `spawn_blocking` on the disk path, idempotent retries, structured errors, and `tracing` + `Metrics` instead of `println`. Specs cap at 64 MiB; code-mode caps at 64 KiB source and 32 tool calls. QuickJS is capped at 64 MiB memory and 1 MiB stack; compute timeout pauses while tools run.
+Bounded in-flight executes (fail-fast overload), deadlines, cancellation, WAL SQLite, `spawn_blocking` on disk, idempotent retries, structured errors, `tracing` + `Metrics`. Specs cap at 64 MiB; code-mode caps at 64 KiB source. Money is integer **micro-USD**; balances change only through grant / reserve / settle / release.
 
-`EXECUTOR_KERNEL` selects the code-mode runtime: unset/`auto` (native subset, then QuickJS), `native`, or `js` (always QuickJS).
+`EXECUTOR_KERNEL` selects the code-mode runtime: unset/`auto` (native subset, then QuickJS), `native`, or `js`.
 
 ## Build
 
-Requires Rust **1.98** (edition 2024).
+Requires Rust **1.98** (edition 2024) and Node.js 22+ for the console / emulate tests.
 
 ```bash
 cargo build --workspace
@@ -32,69 +36,103 @@ cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
 ```
 
-Integration tests call [emulate](https://github.com/vercel-labs/emulate) — the local GitHub / Google / Linear API emulator — they do not vendor it. `cargo test` starts `npx emulate@0.11.2` when `GITHUB_EMULATOR_URL` is unset. Requires Node.js 22+.
-
-```bash
-# optional: start the emulator yourself, then point the tests at it
-npx --yes emulate@0.11.2 --service github,google,linear --seed emulate.config.yaml --port 18400
-export GITHUB_EMULATOR_URL=http://127.0.0.1:18400
-export GOOGLE_EMULATOR_URL=http://127.0.0.1:18401
-export LINEAR_EMULATOR_URL=http://127.0.0.1:18402
-cargo test --workspace --all-features
-```
+Integration tests call [emulate](https://github.com/vercel-labs/emulate). `cargo test` starts `npx emulate@0.11.2` when `GITHUB_EMULATOR_URL` is unset.
 
 ## Run
 
+The daemon on `127.0.0.1:4788` serves the API **and** the embedded console (`executor web`). Optional Next chrome on `127.0.0.1:43123`.
+
 ```bash
-# in-process CLI against ~/.executor (or EXECUTOR_DATA_DIR)
-executor tools list
-executor tools integrations
-executor call executor.openapi.addSpec '{"slug":"pets","spec":"{...}"}' --yes
-executor call tools.pets.org.work.pets.listPets '{}' --yes
-executor call --code 'return await tools.search({"query":"pets"});' --yes
-EXECUTOR_KERNEL=js executor call --code 'return 1 + 2;' --yes
-executor serve --port 4788
-executor mcp          # attach-bridge to :4788/mcp when healthy, else in-process
-executor login --no-poll
-executor server add cloud --origin https://example.test --default
+# daemon (CLI verbs auto-start this)
+executor daemon run --foreground --port 4788
+
+# console
+cd console
+npm install
+npm run dev
 ```
 
-Daemon HTTP (loopback by default; `EXECUTOR_BIND=0.0.0.0` for containers):
+Then open http://127.0.0.1:4788 (`executor web`) or the Next console at http://127.0.0.1:43123. Copy is Portuguese (Brazil). The console chrome matches the original Executor; Treg catalog, saldo, Arena, equipes, skills and artefatos sit beside it.
+
+```bash
+executor catalog search encontrar e-mail
+executor catalog get hunter.people.email.find
+executor call hunter.people.email.find '{"domain":"stripe.com","full_name":"Patrick Collison"}'
+executor connections add hunter work --value token=sk_own
+executor connections list
+executor balance
+executor topup --micro 5000000
+executor org create Acme
+executor arena run people.email.find --query domain=stripe.com --query full_name=Ada
+executor run git -- --version
+executor tools list
+executor call --help github --match list --limit 20
+executor resume --execution-id <id> --action accept
+executor mcp
+```
+
+`executor.jsonc` at the working directory or `$EXECUTOR_DATA_DIR/executor.jsonc` is applied on daemon boot.
+
+Protected routes require `Authorization: Bearer`, `x-executor-token`, `x-treg-token`, or `?_token=` from `{data_dir}/server-control/auth.json` (mode `0600`). `GET /health`, `GET /api/health`, well-known, CIMD, OAuth callback, and `GET /api/console/bootstrap` stay public on loopback.
 
 | Path | Purpose |
 |---|---|
 | `GET /health` | liveness + loaded plugins |
-| `GET /metrics` | atomic counters |
-| `POST /mcp` | MCP JSON-RPC |
-| `POST /api/execute` | `{ "path", "args", "auto_approve", "idempotency_key" }` |
-| `POST /api/execute-code` | `{ "source", "auto_approve" }` |
-| `GET /api/tools` | catalog page |
-| `GET /api/auth/cli-login` | RFC 8628 discovery |
-| `POST /api/oauth/register` | RFC 7591 DCR proxy |
-| `GET /api/oauth/callback` | authorization-code landing (prints JSON; no chrome) |
-| `GET /.well-known/oauth-protected-resource` | RFC 9728 |
-| `GET /.well-known/oauth-authorization-server` | RFC 8414 (does **not** advertise ID-JAG) |
+| `GET /api/health` | CLI probe; body `ok` |
+| `GET /api/catalog?q=` | job search (`providers`, `catalog_size`) |
+| `GET /api/catalog/{id}` | endpoint + price + schema |
+| `POST /api/call` | faithful priced/own-key call; `strict_query` → 400 |
+| `GET /api/integrations/browse` | plugins + Google Discovery + Treg providers |
+| `GET/POST /api/policies` · `DELETE /api/policies/{id}` | org-outer policy |
+| `GET/POST /api/connections` | list / create (values write-only) |
+| `GET/PATCH/DELETE /api/connections/{owner}/{integration}/{name}` | metadata / patch / remove |
+| `POST /api/connections/{…}/refresh` · `/validate` | health + re-resolve tools |
+| `POST /api/oauth/clients` · `POST /api/oauth/start` | public client + PKCE |
+| `GET /api/balance` · `POST /api/balance/grant` | micro-USD ledger |
+| `GET/POST /api/team-tools` | own relay tools |
+| `GET/POST /api/overflow-relays` · `GET/POST /api/overflow` | platform overflow + opt-out |
+| `GET/POST /api/balance/topup` · `POST /api/stripe/webhook` | Stripe/local checkout |
+| `GET/POST /api/orgs` · `/join` · `/{slug}/invites` | teams + invites |
+| `GET/POST /api/skills` | SKILL.md bundles |
+| `GET/POST /api/artifacts` | named artifacts |
+| `GET /api/arena/capabilities` · `POST /api/arena/run` | Enrich Arena |
+| `GET /api/cli` · `POST /api/cli/run` | vendor CLI jail |
+| `GET/POST /call/{url}` | faithful host relay |
+| `GET /` | embedded console SPA |
+| `GET /api/console/bootstrap` | loopback UI session |
+| `POST /mcp` | Streamable HTTP MCP (`execute` / `skills` / `resume` / `catalog_*` / `connections_list`) |
+| `POST /executions` | code-mode |
+| `GET /executions/:id` | inspect pause |
+| `POST /executions/:id/resume` | approve / decline / cancel |
 
-Default data dir: `EXECUTOR_DATA_DIR` or `~/.executor`. Catalog and secrets file mode `0600`. Secret key: `EXECUTOR_SECRET_KEY` or `secret.key`.
+Default data dir: `EXECUTOR_DATA_DIR` or `~/.executor`. `executor web` opens the daemon SPA; set `EXECUTOR_CONSOLE_ORIGIN` to force the Next origin. Point Next at a non-default daemon with `EXECUTOR_DAEMON_ORIGIN`. Stripe Checkout is used when `STRIPE_SECRET_KEY` is set.
 
-## Docker
+## Catalog seed
 
-```bash
-docker build -t executor .
-docker run --rm -p 4788:4788 -v executor-data:/var/lib/executor executor
-```
+Shipped in `crates/executor-catalog/data/seed.json` (not 3k YAML endpoints):
 
-The image binds `0.0.0.0:4788` as `nobody`. Put a reverse proxy in front for anything non-local.
+| Id | Access |
+|---|---|
+| `demo.echo` | anonymous, free |
+| `demo.strict` | anonymous, `strict_query` |
+| `hunter.people.email.find` / `.verify` | priced mock |
+| `treg.people.email.find` | routed capability → hunter child |
+| `github.user.get` | emulate when `GITHUB_EMULATOR_URL` is set |
+| `moz.backlinks.lookup` | priced mock |
+| `internal.private.crm` | unpublished price → refuse unless own key |
+
+YAML ingest (`Catalog::load_yaml_dir` / `CatalogService::from_env_and_data_dir`) reads Treg-shaped documents from `EXECUTOR_CATALOG_DIR` (colon-separated) and `{data_dir}/catalog` on daemon boot. Seed ids win on merge. `*.extended.yaml` and meta files (`adapters`, `aliases`, `capabilities`, `contracts`) are skipped unless `EXECUTOR_CATALOG_INCLUDE_EXTENDED=1`.
 
 ## Crate layout
 
 ```
 executor-core → executor-storage / executor-secrets → executor-codemode
-  → executor-engine → executor-plugin-{openapi,graphql,mcp}
+  → executor-catalog → executor-engine → executor-plugin-{openapi,graphql,mcp}
   → executor-host / executor-sdk → executor-cli
-executor-test-support   starts/attaches to `npx emulate` for integration tests
+console/                 Next.js App Router + shadcn (pt-BR)
+executor-test-support    npx emulate for integration tests
 ```
 
-## Not ported
+## Not in this cut
 
-Web console, desktop shell, marketing site, `executor web`, OAuth browser chrome, QuickJS/Deno/workerd. Cloudflare is a fetch proxy (`workers/proxy.js`), not the original UI+D1+WASM worker. `open` / `docs` print URLs only.
+Deno / workerd kernels stay out on purpose. Hosted `treg.to` billing, PostHog telemetry, and live Stripe HMAC verification (local checkout + optional Checkout session) are operator concerns, not missing product surfaces.

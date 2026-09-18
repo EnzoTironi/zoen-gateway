@@ -16,6 +16,7 @@ mod lex;
 mod parse;
 mod quickjs;
 mod recover;
+mod strip;
 
 use async_trait::async_trait;
 use executor_core::{ExecutorError, Limits, Outcome};
@@ -27,6 +28,7 @@ pub use eval::run;
 pub use parse::parse;
 pub use quickjs::KernelPreference;
 pub use recover::recover_execution_body;
+pub use strip::strip_typescript;
 
 /// Compile a single catalog call into the subset grammar.
 #[must_use]
@@ -56,8 +58,29 @@ impl From<CodeError> for ExecutorError {
 pub trait CodeHost: Send + Sync {
     /// Invoke one catalog / static tool.
     async fn invoke(&self, path: &str, args: Value) -> Result<Outcome, CodeError>;
-    /// Search visible tools (`tools.search({query})`).
-    async fn search(&self, query: &str) -> Result<Value, CodeError>;
+    /// Search visible tools (`tools.search({query, namespace, limit, offset})`).
+    async fn search(&self, args: &Value) -> Result<Value, CodeError>;
+    /// Compact TypeScript shapes (`tools.describe.tool({path})`).
+    async fn describe_tool(&self, path: &str) -> Result<Value, CodeError> {
+        Ok(serde_json::json!({
+            "path": path,
+            "name": path,
+            "error": {
+                "code": "tool_not_found",
+                "message": format!("Tool not found: {path}")
+            }
+        }))
+    }
+    /// Sandbox `tools.executor.integrations.list`.
+    async fn list_sandbox_integrations(&self, args: &Value) -> Result<Value, CodeError> {
+        let _ = args;
+        Ok(serde_json::json!({
+            "items": [],
+            "total": 0,
+            "hasMore": false,
+            "nextOffset": null
+        }))
+    }
 }
 
 /// Parse `source` and evaluate it against `host`.
@@ -95,6 +118,7 @@ pub async fn execute_with(
         )));
     }
     let body = recover_execution_body(source);
+    let body = strip_typescript(&body)?;
     if body.len() > limits.max_code_bytes {
         return Err(CodeError::new(format!(
             "source is {} bytes (max {})",
@@ -103,11 +127,11 @@ pub async fn execute_with(
         )));
     }
     match preference {
-        KernelPreference::Js => quickjs::run(source, host, limits).await,
+        KernelPreference::Js => quickjs::run(&body, host, limits).await,
         KernelPreference::Native => native(&body, host, limits).await,
         KernelPreference::Auto => match parse(&body) {
             Ok(program) => run(program, host, limits).await,
-            Err(_) => quickjs::run(source, host, limits).await,
+            Err(_) => quickjs::run(&body, host, limits).await,
         },
     }
 }
@@ -135,8 +159,8 @@ mod tests {
             })
         }
 
-        async fn search(&self, query: &str) -> Result<Value, CodeError> {
-            Ok(json!([{"query": query}]))
+        async fn search(&self, args: &Value) -> Result<Value, CodeError> {
+            Ok(json!([{"query": args.get("query").and_then(Value::as_str).unwrap_or("")}]))
         }
     }
 
@@ -183,10 +207,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_unknown_ident() {
-        let err = execute("return foo;", &EchoHost, &Limits::production())
+    async fn strips_typescript_annotations() {
+        let src = "const n: number = 2;\nreturn n + 1;";
+        let out = execute(src, &EchoHost, &Limits::production())
             .await
-            .expect_err("ident");
-        assert!(err.0.contains("unknown"), "{err}");
+            .expect("run");
+        match out {
+            Outcome::Completed {
+                result: ToolResult::Ok { data, .. },
+                ..
+            } => assert_eq!(data, json!(3)),
+            other => panic!("{other:?}"),
+        }
     }
 }

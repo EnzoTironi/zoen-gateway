@@ -178,6 +178,9 @@ pub enum PauseReason {
         /// Optional description.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
+        /// Form schema for persist-choice (and any extra fields).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<Value>,
     },
     /// OAuth / credential elicitation.
     Auth {
@@ -199,6 +202,12 @@ pub enum PauseReason {
         message: String,
         /// JSON Schema the operator should fill.
         schema: Value,
+        /// Address to invoke on accept, when this form is a mid-call pause.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        address: Option<String>,
+        /// Args to merge with form content on accept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args: Option<Value>,
     },
 }
 
@@ -214,15 +223,49 @@ pub struct PausedExecution {
 }
 
 /// Resume decision.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ResumeAction {
     /// Proceed.
+    #[default]
     Accept,
     /// Refuse.
     Decline,
     /// Cancel without running.
     Cancel,
+}
+
+/// How long an accepted approval should last.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PersistChoice {
+    /// Skip approval for this tool until the row is cleared (daemon session KV).
+    Session,
+    /// Write an `approve` policy for this tool path.
+    Always,
+}
+
+impl PersistChoice {
+    /// Parse `session` / `always`.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "session" => Some(Self::Session),
+            "always" => Some(Self::Always),
+            _ => None,
+        }
+    }
+}
+
+/// Resume payload: action plus optional form content and persist-choice.
+#[derive(Clone, Debug, Default)]
+pub struct ResumeRequest {
+    /// accept / decline / cancel.
+    pub action: ResumeAction,
+    /// Form fields (`persist` inside the object is also honored).
+    pub content: Option<Value>,
+    /// Explicit persist-choice (wins over `content.persist`).
+    pub persist: Option<PersistChoice>,
 }
 
 /// Terminal or paused outcome of `execute`.
@@ -280,6 +323,32 @@ impl Outcome {
                 "status": "paused",
                 "executionId": execution.id.as_str(),
                 "interaction": execution.reason,
+            }),
+        }
+    }
+
+    /// Original HTTP `POST /executions` wire body.
+    #[must_use]
+    pub fn execution_api(&self) -> Value {
+        match self {
+            Self::Completed {
+                result,
+                execution_id,
+            } => {
+                let structured = result.envelope();
+                serde_json::json!({
+                    "status": "completed",
+                    "text": structured.to_string(),
+                    "structured": structured,
+                    "isError": matches!(result, ToolResult::Err { .. }),
+                    "executionId": execution_id.as_str(),
+                })
+            }
+            Self::Paused { execution } => serde_json::json!({
+                "status": "paused",
+                "text": format!("paused: {}", execution.id),
+                "structured": execution,
+                "executionId": execution.id.as_str(),
             }),
         }
     }

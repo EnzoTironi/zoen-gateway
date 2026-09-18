@@ -263,12 +263,26 @@ async fn eval_call(
     }
     let payload = call_payload(args, env, host, limits, steps, calls).await?;
     if path == "search" {
-        let query = payload
-            .get("query")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
-        return Ok(Runtime::Json(host.search(&query).await?));
+        return Ok(Runtime::Json(host.search(&payload).await?));
+    }
+    if path == "describe.tool" {
+        let tool_path = payload.get("path").and_then(Value::as_str).ok_or_else(|| {
+            CodeError::new("tools.describe.tool expects an object: { path: string }")
+        })?;
+        if tool_path.is_empty() {
+            return Err(CodeError::new("describe.tool requires a path"));
+        }
+        if payload.get("includeSchemas").is_some() {
+            return Err(CodeError::new(
+                "tools.describe.tool no longer accepts includeSchemas",
+            ));
+        }
+        return Ok(Runtime::Json(host.describe_tool(tool_path).await?));
+    }
+    if path == "executor.integrations.list" {
+        return Ok(Runtime::Json(
+            host.list_sandbox_integrations(&payload).await?,
+        ));
     }
     match host.invoke(&path, payload).await? {
         Outcome::Paused { execution } => Ok(Runtime::Paused(execution)),

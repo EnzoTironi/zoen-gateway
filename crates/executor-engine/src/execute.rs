@@ -5,9 +5,11 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use executor_core::{
-    ConnectionRef, ExecuteOptions, ExecutionId, ExecutionState, ExecutorError, InvokeCtx, Outcome,
-    PauseReason, PausedExecution, PolicyAction, ResumeAction, Tool, ToolError, ToolResult,
-    metric_names, strip_secret_refs, unix_now_ms, validate_against,
+    ConnectionRef, ExecuteOptions, ExecutionId, ExecutionState, ExecutorError, InvokeCtx,
+    KV_SESSION_APPROVALS, KV_SUBJECTS, LOCAL_SUBJECT, Outcome, Owner, PauseReason, PausedExecution,
+    PersistChoice, PolicyAction, PolicyId, PolicyPattern, ResumeAction, ResumeRequest, Tool,
+    ToolError, ToolPolicy, ToolResult, metric_names, strip_secret_refs, unix_now_ms,
+    validate_against,
 };
 use serde_json::Value;
 use tokio::sync::OwnedSemaphorePermit;
@@ -54,13 +56,13 @@ impl Inner {
     pub(crate) async fn resume(
         &self,
         id: &ExecutionId,
-        action: ResumeAction,
+        request: ResumeRequest,
         cancel: CancellationToken,
     ) -> Result<Outcome, ExecutorError> {
         let permit = self.acquire_permit().await?;
         let _inflight = self.arm_inflight();
         let timeout = self.limits.execute_timeout;
-        let result = select_deadline(self.resume_gated(id.clone(), action), cancel, timeout).await;
+        let result = select_deadline(self.resume_gated(id.clone(), request), cancel, timeout).await;
         drop(permit);
         result
     }
@@ -140,15 +142,15 @@ impl Inner {
         let tool = resolved.tool().clone();
         Self::validate_args(&tool, &args)?;
         let id = ExecutionId::mint();
+        self.touch_subject();
         if let Some(key) = &opts.idempotency_key
             && let Some(outcome) = self.claim_idempotent(key, &id).await?
         {
             return Ok(outcome);
         }
         let _ = self.gate(&tool)?;
-        let outcome = self
-            .dispatch(&resolved, args, &id, opts.auto_approve)
-            .await?;
+        let auto = opts.auto_approve || self.session_approved(&tool);
+        let outcome = self.dispatch(&resolved, args, &id, auto).await?;
         self.persist_outcome(&id, &outcome).await?;
         Ok(outcome)
     }
@@ -156,7 +158,7 @@ impl Inner {
     async fn resume_gated(
         &self,
         id: ExecutionId,
-        action: ResumeAction,
+        request: ResumeRequest,
     ) -> Result<Outcome, ExecutorError> {
         let store = Arc::clone(&self.store);
         let taken_id = id.clone();
@@ -164,8 +166,19 @@ impl Inner {
         let Some(state) = state else {
             return Err(ExecutorError::ExecutionNotFound(id.to_string()));
         };
-        match (state, action) {
+        match (state, request.action) {
             (ExecutionState::Paused { address, args, .. }, ResumeAction::Accept) => {
+                let (persist, content) = split_persist(request.persist, request.content);
+                if let Some(choice) = persist {
+                    self.apply_persist(choice, &address)?;
+                }
+                let args = merge_resume_content(args, content);
+                if address.is_empty() {
+                    return Ok(Outcome::Completed {
+                        result: ToolResult::ok(args),
+                        execution_id: id,
+                    });
+                }
                 let resolved = self.resolve_path(&address)?;
                 self.dispatch(&resolved, args, &id, true).await
             }
@@ -183,6 +196,76 @@ impl Inner {
             }
             (_, _) => Err(ExecutorError::NotPaused(id.to_string())),
         }
+    }
+
+    fn touch_subject(&self) {
+        let body = serde_json::json!({
+            "external_id": LOCAL_SUBJECT,
+            "last_seen_at": unix_now_ms(),
+            "status": "active",
+        });
+        let _ = self.store.put_kv(KV_SUBJECTS, LOCAL_SUBJECT, body);
+    }
+
+    fn session_approved(&self, tool: &Tool) -> bool {
+        let path = tool.cli_path();
+        let address = tool.address.to_string();
+        self.store
+            .get_kv(KV_SESSION_APPROVALS, &path)
+            .ok()
+            .flatten()
+            .is_some()
+            || self
+                .store
+                .get_kv(KV_SESSION_APPROVALS, &address)
+                .ok()
+                .flatten()
+                .is_some()
+    }
+
+    fn apply_persist(&self, persist: PersistChoice, address: &str) -> Result<(), ExecutorError> {
+        match persist {
+            PersistChoice::Session => {
+                self.store.put_kv(
+                    KV_SESSION_APPROVALS,
+                    address,
+                    serde_json::json!({ "approved": true, "path": address }),
+                )?;
+            }
+            PersistChoice::Always => {
+                if address.is_empty() {
+                    return Ok(());
+                }
+                self.store.put_kv(
+                    KV_SESSION_APPROVALS,
+                    address,
+                    serde_json::json!({ "approved": true, "scope": "always", "path": address }),
+                )?;
+                let pattern = PolicyPattern::new(address).map_err(ExecutorError::InvalidPattern)?;
+                let existing = self.store.list_policies()?;
+                let owner_rows: Vec<(String, String, String)> = existing
+                    .iter()
+                    .filter(|p| p.owner == Owner::Org)
+                    .map(|p| {
+                        (
+                            p.pattern.as_str().to_owned(),
+                            p.position.clone(),
+                            p.id.as_str().to_owned(),
+                        )
+                    })
+                    .collect();
+                let position = executor_core::position_for_new_pattern(address, &owner_rows);
+                let id = PolicyId::new(format!("pol_persist_{}", unix_now_ms()))?;
+                self.store.put_policy(ToolPolicy {
+                    id,
+                    owner: Owner::Org,
+                    pattern,
+                    action: PolicyAction::Approve,
+                    position,
+                })?;
+            }
+        }
+        Ok(())
     }
 
     fn reject_oversize(&self, args: &Value) -> Result<(), ExecutorError> {
@@ -278,6 +361,16 @@ impl Inner {
                     .annotations
                     .as_ref()
                     .and_then(|a| a.approval_description.clone()),
+                schema: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "persist": {
+                            "type": "string",
+                            "enum": ["session", "always"],
+                            "description": "session remembers this tool until cleared; always writes an approve policy"
+                        }
+                    }
+                })),
             },
             expires_at_ms: unix_now_ms().saturating_add(ttl),
         };
@@ -442,11 +535,49 @@ enum DynamicOut {
 fn paused_resume_target(execution: &executor_core::PausedExecution) -> (String, Value) {
     match &execution.reason {
         PauseReason::Approval { address, args, .. } => (address.clone(), args.clone()),
-        PauseReason::Auth { address, args, .. } => (
+        PauseReason::Auth { address, args, .. }
+        | PauseReason::Elicitation { address, args, .. } => (
             address.clone().unwrap_or_default(),
             args.clone().unwrap_or(Value::Null),
         ),
-        PauseReason::Elicitation { .. } => (String::new(), Value::Null),
+    }
+}
+
+fn split_persist(
+    explicit: Option<PersistChoice>,
+    content: Option<Value>,
+) -> (Option<PersistChoice>, Option<Value>) {
+    let Some(mut content) = content else {
+        return (explicit, None);
+    };
+    let from_content = content
+        .get("persist")
+        .and_then(Value::as_str)
+        .and_then(PersistChoice::parse);
+    if let Some(obj) = content.as_object_mut() {
+        obj.remove("persist");
+    }
+    let persist = explicit.or(from_content);
+    let content = match &content {
+        Value::Object(map) if map.is_empty() => None,
+        Value::Null => None,
+        other => Some(other.clone()),
+    };
+    (persist, content)
+}
+
+fn merge_resume_content(args: Value, content: Option<Value>) -> Value {
+    let Some(content) = content else {
+        return args;
+    };
+    match (args, content) {
+        (Value::Object(mut base), Value::Object(extra)) => {
+            for (k, v) in extra {
+                base.insert(k, v);
+            }
+            Value::Object(base)
+        }
+        (_, content) => content,
     }
 }
 

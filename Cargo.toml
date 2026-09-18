@@ -60,6 +60,7 @@ executor-plugin-openapi = { path = "crates/executor-plugin-openapi" }
 executor-sdk = { path = "crates/executor-sdk" }
 executor-secrets = { path = "crates/executor-secrets" }
 executor-storage = { path = "crates/executor-storage" }
+executor-catalog = { path = "crates/executor-catalog" }
 
 [workspace.lints.rust]
 missing_docs = "deny"

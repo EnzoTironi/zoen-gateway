@@ -1,31 +1,39 @@
-//! `executor` CLI — catalog, call, resume, MCP, daemon, login. No web UI.
+//! `executor` CLI — catalog, call, connections, resume, MCP, daemon, login, console.
 
 #![allow(clippy::module_name_repetitions)]
 
+mod call_help;
+mod daemon;
 mod login;
 mod mcp_bridge;
 mod profiles;
+mod service;
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use executor_core::{
-    ExecuteOptions, ExecutionId, IdempotencyKey, ResumeAction, ToolListFilter, compile_call,
-    resolve_invocation, unix_now_ms,
+use executor_catalog::CatalogService;
+use executor_core::{compile_call, resolve_invocation, unix_now_ms};
+use executor_host::{
+    AppState, DEFAULT_PORT, DEFAULT_SERVICE_PORT, HostConfig, default_allowed_hosts,
+    load_or_mint_auth_with, serve,
 };
-use executor_host::{AppState, DEFAULT_PORT, DEFAULT_SERVICE_PORT, HostConfig, serve};
-use executor_sdk::{CreateOptions, create_executor, create_executor_with_metrics, data_dir};
+use executor_sdk::{
+    CreateOptions, apply_config, create_executor_with_metrics, data_dir, load_jsonc,
+};
+use executor_storage::DataDirLock;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-/// Executor — integration catalog for agents.
+/// Executor ∪ Treg — integration catalog and priced tool gateway.
 #[derive(Parser, Debug)]
 #[command(
     name = "executor",
     version,
-    about = "Integration catalog for agents (CLI only)"
+    about = "Catálogo de integrações e ferramentas com preço (Executor ∪ Treg)"
 )]
 struct Cli {
     /// Catalog directory (overrides `EXECUTOR_DATA_DIR`).
@@ -38,9 +46,19 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Invoke a tool, or run a code-mode script with `--code`.
+    #[command(disable_help_flag = true)]
     Call {
         /// Path segments and optional trailing JSON / `@file.json`.
         path: Vec<String>,
+        /// Namespace browse (`executor call --help github`).
+        #[arg(short = 'h', long = "help")]
+        show_help: bool,
+        /// Substring filter for `--help` children.
+        #[arg(long = "match")]
+        match_query: Option<String>,
+        /// Max children to print with `--help`.
+        #[arg(long)]
+        limit: Option<usize>,
         /// Bounded code-mode source (`return await tools["path"]({})`).
         #[arg(long)]
         code: Option<String>,
@@ -59,14 +77,30 @@ enum Commands {
         /// accept | decline | cancel
         #[arg(long, default_value = "accept")]
         action: String,
+        /// JSON content for form elicitations.
+        #[arg(long)]
+        content: Option<String>,
+        /// Persist-choice: `session` or `always`.
+        #[arg(long)]
+        persist: Option<String>,
     },
     /// Tool catalog.
     Tools {
         #[command(subcommand)]
         cmd: ToolsCmd,
     },
-    /// MCP stdio host (bridges to the daemon when it is up).
-    Mcp,
+    /// MCP stdio host (always bridges to the daemon `/mcp`).
+    Mcp {
+        /// `code` (default) or `passthrough`.
+        #[arg(long, default_value = "code")]
+        mode: String,
+        /// `browser` (default) or `model`.
+        #[arg(long, default_value = "browser")]
+        elicitation_mode: String,
+        /// Register `search_<integration>` tools.
+        #[arg(long)]
+        search_tools: bool,
+    },
     /// Foreground HTTP daemon (loopback).
     Serve {
         #[arg(long, default_value_t = DEFAULT_PORT)]
@@ -77,8 +111,12 @@ enum Commands {
         #[command(subcommand)]
         cmd: DaemonCmd,
     },
-    /// Write a systemd user unit (Linux).
-    Install,
+    /// Write an OS service unit (systemd --user / launchd / schtasks).
+    Install {
+        /// Best-effort boot-before-login (linger / ONSTART).
+        #[arg(long)]
+        boot: bool,
+    },
     /// Remove the systemd user unit.
     Uninstall,
     /// RFC 8628 device login (prints a verification URL).
@@ -126,6 +164,81 @@ enum Commands {
         #[arg(long)]
         no_open: bool,
     },
+    /// Open the pt-BR console (ensure daemon, print origin).
+    Web {
+        #[arg(long)]
+        no_open: bool,
+        /// Console origin (default: daemon SPA, or `EXECUTOR_CONSOLE_ORIGIN`).
+        #[arg(long)]
+        origin: Option<String>,
+    },
+    /// Search the priced catalog by job.
+    Catalog {
+        #[command(subcommand)]
+        cmd: Option<CatalogCmd>,
+    },
+    /// Saved connections (secrets never printed).
+    Connections {
+        #[command(subcommand)]
+        cmd: ConnectionsCmd,
+    },
+    /// Prepaid balance (micro-USD).
+    Balance,
+    /// Create a top-up intent (local confirm or Stripe).
+    Topup {
+        /// Amount in micro-USD (default `5_000_000` = US$ 5).
+        #[arg(long)]
+        micro: Option<i64>,
+        /// Confirm a local intent id.
+        #[arg(long)]
+        confirm: Option<String>,
+    },
+    /// Teams, convites e membros.
+    Org {
+        #[command(subcommand)]
+        cmd: OrgCmd,
+    },
+    /// Uploaded SKILL.md bundles.
+    Skills {
+        #[command(subcommand)]
+        cmd: SkillsCmd,
+    },
+    /// Vendor CLI jail (server-side).
+    Run {
+        /// Binary basename (`stripe`, `gh`, `git`).
+        binary: String,
+        /// Arguments after `--`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+        /// Provider whose connection secret is injected.
+        #[arg(long)]
+        integration: Option<String>,
+    },
+    /// Enrich Arena.
+    Arena {
+        #[command(subcommand)]
+        cmd: ArenaCmd,
+    },
+    /// Scan or upload skills / env keys.
+    Upload {
+        #[command(subcommand)]
+        cmd: UploadCmd,
+    },
+    /// Preview what `upload` would register.
+    Scan {
+        /// Directory of skills (SKILL.md).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// `.env` to scan.
+        #[arg(long)]
+        env_file: Option<PathBuf>,
+    },
+    /// Team-owned relay tools.
+    #[command(name = "team-tool")]
+    TeamTool {
+        #[command(subcommand)]
+        cmd: TeamToolCmd,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -142,12 +255,21 @@ enum ToolsCmd {
 
 #[derive(Subcommand, Debug)]
 enum DaemonCmd {
-    /// Run the daemon (foreground; writes a pid file).
+    /// Run the daemon (detached unless `--foreground`).
     Run {
         #[arg(long, default_value_t = DEFAULT_PORT)]
         port: u16,
         #[arg(long)]
         foreground: bool,
+        /// Bind hostname (`127.0.0.1`, `0.0.0.0`, `localhost`).
+        #[arg(long, default_value = "127.0.0.1")]
+        hostname: String,
+        /// Extra CORS origins (repeatable).
+        #[arg(long = "allowed-host")]
+        allowed_host: Vec<String>,
+        /// Override the minted `auth.json` bearer.
+        #[arg(long)]
+        auth_token: Option<String>,
     },
     /// Print pid/status.
     Status,
@@ -183,9 +305,140 @@ enum ServerCmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum CatalogCmd {
+    /// Search by job (`encontrar e-mail`).
+    Search {
+        /// Job phrase.
+        #[arg(required = true, trailing_var_arg = true)]
+        job: Vec<String>,
+    },
+    /// One endpoint: schema + price.
+    Get {
+        /// Catalog id (`hunter.people.email.find`).
+        id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConnectionsCmd {
+    /// List metadata (no secret values).
+    List,
+    /// Create a connection (`--value token=…`).
+    Add {
+        integration: String,
+        name: String,
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long, default_value = "bearer")]
+        template: String,
+        #[arg(long)]
+        identity_label: Option<String>,
+        /// Repeatable `KEY=VALUE` (write-only).
+        #[arg(long = "value", value_name = "KEY=VALUE")]
+        values: Vec<String>,
+    },
+    /// Delete `owner integration name`.
+    Remove {
+        owner: String,
+        integration: String,
+        name: String,
+    },
+    /// Re-resolve tools.
+    Refresh {
+        owner: String,
+        integration: String,
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum OrgCmd {
+    /// List teams.
+    Ls,
+    /// Create a team (become owner).
+    Create { name: String },
+    /// Invite by e-mail.
+    Invite {
+        email: String,
+        #[arg(long)]
+        org: String,
+        #[arg(long, default_value = "member")]
+        role: String,
+    },
+    /// Accept an invite code.
+    Join { code: String },
+    /// List members.
+    Members { org: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum SkillsCmd {
+    /// List uploaded skills.
+    Ls,
+    /// Register a SKILL.md.
+    Add {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Print install files.
+    Install { slug: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum ArenaCmd {
+    /// List comparable capabilities.
+    Ls,
+    /// Run every competitor.
+    Run {
+        capability: String,
+        #[arg(long = "query", value_name = "KEY=VALUE")]
+        query: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum UploadCmd {
+    /// Register every SKILL.md under a directory.
+    Skills {
+        #[arg(long)]
+        dir: PathBuf,
+    },
+    /// Create connections from a `.env` (known keys only).
+    Env {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        select: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TeamToolCmd {
+    /// List team tools (no secrets).
+    List,
+    /// Register a relay (`base_url` + secret).
+    Add {
+        name: String,
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        base_url: String,
+        #[arg(long)]
+        secret: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum ServiceCmd {
     /// Alias of `install`.
-    Install,
+    Install {
+        #[arg(long)]
+        boot: bool,
+    },
     /// Alias of `uninstall`.
     Uninstall,
     /// Alias of `daemon status`.
@@ -213,38 +466,75 @@ async fn main() {
     }
 }
 
+#[allow(clippy::too_many_lines)] // clap dispatch
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = cli.data_dir.clone();
     match cli.command {
         Commands::Call {
             path,
+            show_help,
+            match_query,
+            limit,
             code,
             yes,
             idempotency_key,
-        } => cmd_call(dir.as_deref(), path, code, yes, idempotency_key).await,
+        } => {
+            if show_help {
+                let origin = daemon::ensure_daemon(dir.as_deref()).await?;
+                let token = daemon::bearer_token(dir.as_deref());
+                call_help::run(
+                    &origin,
+                    token.as_deref(),
+                    &path,
+                    match_query.as_deref(),
+                    limit,
+                )
+                .await
+            } else {
+                cmd_call(dir.as_deref(), path, code, yes, idempotency_key).await
+            }
+        }
         Commands::Resume {
             execution_id,
             action,
-        } => cmd_resume(dir.as_deref(), execution_id, action).await,
-        Commands::Tools { cmd } => cmd_tools(dir.as_deref(), cmd),
-        Commands::Mcp => {
-            let exec = create_executor(CreateOptions {
-                data_dir: dir,
-                ..CreateOptions::default()
-            })?;
-            mcp_bridge::run(exec, None).await?;
+            content,
+            persist,
+        } => cmd_resume(dir.as_deref(), execution_id, action, content, persist).await,
+        Commands::Tools { cmd } => cmd_tools(dir.as_deref(), cmd).await,
+        Commands::Mcp {
+            mode,
+            elicitation_mode,
+            search_tools,
+        } => {
+            let origin = daemon::ensure_daemon(dir.as_deref()).await?;
+            let token = daemon::bearer_token(dir.as_deref());
+            let mut q = format!("?mode={mode}&elicitation_mode={elicitation_mode}");
+            if search_tools {
+                q.push_str("&search_tools=true");
+            }
+            mcp_bridge::run(&origin, &q, token.as_deref()).await?;
             Ok(())
         }
-        Commands::Serve { port } => daemon_run(dir.as_deref(), port).await,
+        Commands::Serve { port } => {
+            daemon_run(DaemonRun {
+                dir: dir.as_deref(),
+                port,
+                foreground: true,
+                hostname: "127.0.0.1".into(),
+                allowed_hosts: Vec::new(),
+                auth_token: None,
+            })
+            .await
+        }
         Commands::Daemon { cmd } => daemon_cmd(dir.as_deref(), cmd).await,
-        Commands::Install
+        Commands::Install { boot }
         | Commands::Service {
-            cmd: ServiceCmd::Install,
-        } => install(dir.as_deref()),
+            cmd: ServiceCmd::Install { boot },
+        } => service::install(dir.as_deref(), boot),
         Commands::Uninstall
         | Commands::Service {
             cmd: ServiceCmd::Uninstall,
-        } => uninstall(),
+        } => service::uninstall(),
         Commands::Service {
             cmd: ServiceCmd::Status,
         } => {
@@ -254,8 +544,16 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Commands::Service {
             cmd: ServiceCmd::Restart { port },
         } => {
-            daemon_stop(dir.as_deref());
-            daemon_run(dir.as_deref(), port).await
+            daemon::stop(dir.as_deref());
+            daemon_run(DaemonRun {
+                dir: dir.as_deref(),
+                port,
+                foreground: true,
+                hostname: "127.0.0.1".into(),
+                allowed_hosts: Vec::new(),
+                auth_token: None,
+            })
+            .await
         }
         Commands::Login {
             server,
@@ -274,6 +572,28 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             cmd_docs(no_open);
             Ok(())
         }
+        Commands::Web { no_open, origin } => {
+            cmd_web(dir.as_deref(), no_open, origin).await?;
+            Ok(())
+        }
+        Commands::Catalog { cmd } => cmd_catalog(dir.as_deref(), cmd).await,
+        Commands::Connections { cmd } => cmd_connections(dir.as_deref(), cmd).await,
+        Commands::Balance => cmd_balance(dir.as_deref()).await,
+        Commands::Topup { micro, confirm } => cmd_topup(dir.as_deref(), micro, confirm).await,
+        Commands::Org { cmd } => cmd_org(dir.as_deref(), cmd).await,
+        Commands::Skills { cmd } => cmd_skills(dir.as_deref(), cmd).await,
+        Commands::Run {
+            binary,
+            args,
+            integration,
+        } => cmd_run(dir.as_deref(), binary, args, integration).await,
+        Commands::Arena { cmd } => cmd_arena(dir.as_deref(), cmd).await,
+        Commands::Upload { cmd } => cmd_upload(dir.as_deref(), cmd).await,
+        Commands::Scan {
+            dir: scan_dir,
+            env_file,
+        } => cmd_scan(scan_dir.as_deref(), env_file.as_deref()),
+        Commands::TeamTool { cmd } => cmd_team_tool(dir.as_deref(), cmd).await,
     }
 }
 
@@ -282,18 +602,42 @@ async fn daemon_cmd(
     cmd: DaemonCmd,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match cmd {
-        DaemonCmd::Run { port, .. } => daemon_run(dir, port).await,
+        DaemonCmd::Run {
+            port,
+            foreground,
+            hostname,
+            allowed_host,
+            auth_token,
+        } => {
+            daemon_run(DaemonRun {
+                dir,
+                port,
+                foreground,
+                hostname,
+                allowed_hosts: allowed_host,
+                auth_token,
+            })
+            .await
+        }
         DaemonCmd::Status => {
             daemon_status(dir);
             Ok(())
         }
         DaemonCmd::Stop => {
-            daemon_stop(dir);
+            daemon::stop(dir);
             Ok(())
         }
         DaemonCmd::Restart { port } => {
-            daemon_stop(dir);
-            daemon_run(dir, port).await
+            daemon::stop(dir);
+            daemon_run(DaemonRun {
+                dir,
+                port,
+                foreground: true,
+                hostname: "127.0.0.1".into(),
+                allowed_hosts: Vec::new(),
+                auth_token: None,
+            })
+            .await
         }
     }
 }
@@ -305,24 +649,43 @@ async fn cmd_call(
     yes: bool,
     idempotency_key: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let exec = create_executor(CreateOptions {
-        data_dir: dir.map(Path::to_path_buf),
-        ..CreateOptions::default()
-    })?;
-    let key = idempotency_key.map(IdempotencyKey::new).transpose()?;
-    let opts = ExecuteOptions {
-        auto_approve: yes,
-        timeout: None,
-        idempotency_key: key,
-    };
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    if code.is_none()
+        && looks_like_catalog_id(&path)
+        && let Some(id) = path.first()
+    {
+        let encoded = urlencoding_query(id);
+        if daemon::get_json(
+            &origin,
+            &format!("/api/catalog/{encoded}"),
+            token.as_deref(),
+        )
+        .await
+        .is_ok()
+        {
+            let query = catalog_query_from_path(&path)?;
+            let body = json!({ "id": id, "query": query });
+            let outcome = daemon::post_json(&origin, "/api/call", &body, token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            return Ok(());
+        }
+    }
     let source = if let Some(code) = code {
         code
     } else {
         let invocation = resolve_invocation(&path)?;
         compile_call(&invocation.path, &Value::Object(invocation.args))
     };
-    let outcome = exec.run_code(&source, opts).await?;
-    println!("{}", serde_json::to_string_pretty(&outcome.cli_json())?);
+    let mut body = json!({
+        "code": source,
+        "autoApprove": yes,
+    });
+    if let Some(key) = idempotency_key {
+        body["idempotencyKey"] = json!(key);
+    }
+    let outcome = daemon::post_json(&origin, "/executions", &body, token.as_deref()).await?;
+    println!("{}", serde_json::to_string_pretty(&outcome)?);
     Ok(())
 }
 
@@ -330,109 +693,205 @@ async fn cmd_resume(
     dir: Option<&Path>,
     execution_id: String,
     action: String,
+    content: Option<String>,
+    persist: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let exec = create_executor(CreateOptions {
-        data_dir: dir.map(Path::to_path_buf),
-        ..CreateOptions::default()
-    })?;
-    let id = ExecutionId::new(execution_id)?;
-    let action = match action.as_str() {
-        "accept" => ResumeAction::Accept,
-        "decline" => ResumeAction::Decline,
-        "cancel" => ResumeAction::Cancel,
-        other => return Err(format!("unknown action {other}").into()),
-    };
-    let outcome = exec.resume(&id, action).await?;
-    println!("{}", serde_json::to_string_pretty(&outcome.cli_json())?);
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    let mut body = json!({ "action": action });
+    if let Some(raw) = content {
+        body["content"] = serde_json::from_str(&raw).unwrap_or(Value::String(raw));
+    }
+    if let Some(persist) = persist {
+        body["persist"] = json!(persist);
+    }
+    let path = format!("/executions/{execution_id}/resume");
+    let outcome = daemon::post_json(&origin, &path, &body, token.as_deref()).await?;
+    println!("{}", serde_json::to_string_pretty(&outcome)?);
     Ok(())
 }
 
-fn cmd_tools(
+async fn cmd_tools(
     dir: Option<&Path>,
     cmd: ToolsCmd,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let exec = create_executor(CreateOptions {
-        data_dir: dir.map(Path::to_path_buf),
-        ..CreateOptions::default()
-    })?;
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
     match cmd {
-        ToolsCmd::List => print_tools(&exec.list_tools(&ToolListFilter::default())?),
+        ToolsCmd::List => {
+            let body = daemon::get_json(&origin, "/api/tools", token.as_deref()).await?;
+            print_tool_rows(&body);
+        }
         ToolsCmd::Search { query } => {
-            let tools = exec.list_tools(&ToolListFilter {
-                query: Some(query),
-                ..ToolListFilter::default()
-            })?;
-            if tools.is_empty() {
+            let q = urlencoding_query(&query);
+            let body =
+                daemon::get_json(&origin, &format!("/api/tools?q={q}"), token.as_deref()).await?;
+            if body
+                .get("tools")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty)
+            {
                 println!("(no matching tools)");
             } else {
-                print_tools(&tools);
+                print_tool_rows(&body);
             }
         }
         ToolsCmd::Integrations => {
-            let rows = exec.list_integrations()?;
+            let body = daemon::get_json(&origin, "/api/integrations", token.as_deref()).await?;
+            let rows = body
+                .get("integrations")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             if rows.is_empty() {
                 println!("(no integrations)");
             } else {
                 for i in rows {
-                    println!("{}\t{}\t{}", i.slug, i.kind, i.name);
+                    println!(
+                        "{}\t{}\t{}",
+                        i.get("slug").and_then(Value::as_str).unwrap_or(""),
+                        i.get("kind").and_then(Value::as_str).unwrap_or(""),
+                        i.get("name").and_then(Value::as_str).unwrap_or("")
+                    );
                 }
             }
         }
         ToolsCmd::Describe { path } => {
             let joined = path.join(".");
-            let tool = exec.describe(&joined)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "path": tool.cli_path(),
-                    "address": tool.address.to_string(),
-                    "description": tool.description,
-                    "inputSchema": tool.input_schema,
-                }))?
-            );
+            let q = urlencoding_query(&joined);
+            let body =
+                daemon::get_json(&origin, &format!("/api/tools?q={q}"), token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
         }
     }
     Ok(())
 }
 
-fn print_tools(tools: &[executor_core::Tool]) {
+fn print_tool_rows(body: &Value) {
+    let Some(tools) = body.get("tools").and_then(Value::as_array) else {
+        return;
+    };
     for t in tools {
-        println!("{}\t{}", t.cli_path(), t.description);
+        println!(
+            "{}\t{}",
+            t.get("path").and_then(Value::as_str).unwrap_or(""),
+            t.get("description").and_then(Value::as_str).unwrap_or("")
+        );
     }
 }
 
-fn bind_addr(port: u16) -> SocketAddr {
-    let host = std::env::var("EXECUTOR_BIND").unwrap_or_else(|_| "127.0.0.1".into());
-    let ip: IpAddr = host.parse().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+pub(crate) fn urlencoding_query(value: &str) -> String {
+    let mut out = String::new();
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(char::from(b));
+            }
+            _ => {
+                out.push('%');
+                out.push(hex_digit(b >> 4));
+                out.push(hex_digit(b & 0x0f));
+            }
+        }
+    }
+    out
+}
+
+fn hex_digit(n: u8) -> char {
+    char::from(if n < 10 { b'0' + n } else { b'A' + (n - 10) })
+}
+
+fn bind_addr(hostname: &str, port: u16) -> SocketAddr {
+    let host = std::env::var("EXECUTOR_BIND").unwrap_or_else(|_| hostname.to_owned());
+    if host.eq_ignore_ascii_case("localhost") {
+        return SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), port));
+    }
+    let ip: IpAddr = host.parse().unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     SocketAddr::from((ip, port))
 }
 
-async fn daemon_run(
-    dir: Option<&Path>,
+struct DaemonRun<'a> {
+    dir: Option<&'a Path>,
     port: u16,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    foreground: bool,
+    hostname: String,
+    allowed_hosts: Vec<String>,
+    auth_token: Option<String>,
+}
+
+async fn daemon_run(opts: DaemonRun<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let data = data_dir(opts.dir);
+    let origin_host = if opts.hostname == "0.0.0.0" || opts.hostname == "::" {
+        "127.0.0.1"
+    } else {
+        opts.hostname.as_str()
+    };
+    let origin = format!("http://{origin_host}:{}", opts.port);
+    if !opts.foreground {
+        if daemon::is_healthy(&origin).await {
+            println!("{origin}");
+            return Ok(());
+        }
+        daemon::spawn_daemon(&data, opts.port, &opts.hostname, &opts.allowed_hosts)?;
+        for _ in 0..80 {
+            if daemon::is_healthy(&origin).await {
+                println!("{origin}");
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        return Err(format!("daemon did not become healthy at {origin}").into());
+    }
+    let ownership = DataDirLock::acquire(&data)?;
+    let token = load_or_mint_auth_with(&data, opts.auth_token.as_deref())?;
+    let mut allowed = default_allowed_hosts();
+    allowed.push(opts.hostname.clone());
+    allowed.extend(opts.allowed_hosts.iter().cloned());
+    if opts.hostname == "0.0.0.0" || opts.hostname == "::" {
+        allowed.push("*".into());
+    }
+    allowed.sort();
+    allowed.dedup();
     let metrics = Arc::new(executor_core::AtomicMetrics::new());
     let (sink, sentry) =
         executor_host::attach_sentry(Arc::clone(&metrics) as Arc<dyn executor_core::Metrics>);
     let exec = create_executor_with_metrics(
         CreateOptions {
-            data_dir: dir.map(Path::to_path_buf),
+            data_dir: Some(data.clone()),
             ..CreateOptions::default()
         },
         sink,
     )?;
+    if let Some((path, cfg)) = load_jsonc(Some(&data)) {
+        tracing::info!(path = %path.display(), "applying executor.jsonc");
+        apply_config(&exec, &cfg).await?;
+    }
     let cancel = exec.cancellation_token();
-    let bind = bind_addr(port);
-    let pid_path = data_dir(dir).join("daemon.pid");
+    let bind = bind_addr(&opts.hostname, opts.port);
+    let pid_path = data.join("daemon.pid");
     write_pid(&pid_path)?;
     let ctrlc_task = ctrlc(cancel.clone());
     tracing::info!(%bind, "executor daemon listening");
+    let pointer = daemon::DaemonPointer {
+        origin: origin.clone(),
+        pid: std::process::id(),
+    };
+    let _ = std::fs::create_dir_all(&data);
+    let _ = std::fs::write(
+        daemon::pointer_path(Some(&data)),
+        serde_json::to_vec_pretty(&pointer).unwrap_or_default(),
+    );
+    let state = AppState::new(exec, Some(metrics))
+        .with_control(Some(token), allowed, origin)
+        .with_catalog(Arc::new(CatalogService::from_env_and_data_dir(Some(&data))));
     let result = serve(
         HostConfig {
             bind,
-            limits: exec.limits().clone(),
+            limits: state.executor.limits().clone(),
+            auth_token: state.auth_token.clone(),
+            allowed_hosts: state.allowed_hosts.clone(),
         },
-        AppState::new(exec, Some(metrics)),
+        state,
         cancel,
     )
     .await;
@@ -440,26 +899,20 @@ async fn daemon_run(
     drop(ctrlc_task);
     result?;
     drop(sentry);
+    drop(ownership);
     Ok(())
 }
 
 fn daemon_status(dir: Option<&Path>) {
-    let pid_path = data_dir(dir).join("daemon.pid");
+    let data = data_dir(dir);
+    if let Ok(text) = std::fs::read_to_string(daemon::pointer_path(Some(&data))) {
+        println!("{text}");
+        return;
+    }
+    let pid_path = data.join("daemon.pid");
     match std::fs::read_to_string(&pid_path) {
         Ok(s) => println!("pid {} ({})", s.trim(), pid_path.display()),
         Err(_) => println!("daemon is not running"),
-    }
-}
-
-fn daemon_stop(dir: Option<&Path>) {
-    let pid_path = data_dir(dir).join("daemon.pid");
-    if let Ok(s) = std::fs::read_to_string(&pid_path) {
-        if let Ok(pid) = s.trim().parse::<i32>() {
-            let _ = std::process::Command::new("kill")
-                .arg(pid.to_string())
-                .status();
-        }
-        let _ = std::fs::remove_file(pid_path);
     }
 }
 
@@ -476,39 +929,6 @@ fn ctrlc(cancel: CancellationToken) -> tokio::task::JoinHandle<()> {
         let _ = tokio::signal::ctrl_c().await;
         cancel.cancel();
     })
-}
-
-fn install(dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let exe = std::env::current_exe()?;
-    let data = data_dir(dir);
-    let unit = format!(
-        "[Unit]\nDescription=Executor daemon\n[Service]\nExecStart={} daemon run --port {DEFAULT_SERVICE_PORT}\nEnvironment=EXECUTOR_DATA_DIR={}\nRestart=on-failure\n[Install]\nWantedBy=default.target\n",
-        exe.display(),
-        data.display()
-    );
-    let path = systemd_unit_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, unit)?;
-    println!("wrote {}", path.display());
-    println!("enable with: systemctl --user enable --now executor.service");
-    Ok(())
-}
-
-fn uninstall() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let path = systemd_unit_path()?;
-    match std::fs::remove_file(&path) {
-        Ok(()) => println!("removed {}", path.display()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("not installed"),
-        Err(e) => return Err(e.into()),
-    }
-    Ok(())
-}
-
-fn systemd_unit_path() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-    let home = std::env::var("HOME")?;
-    Ok(PathBuf::from(home).join(".config/systemd/user/executor.service"))
 }
 
 async fn cmd_login(
@@ -655,7 +1075,7 @@ fn cmd_server(
 }
 
 fn cmd_open(no_open: bool) {
-    let url = format!("http://127.0.0.1:{DEFAULT_PORT}/health");
+    let url = format!("http://127.0.0.1:{DEFAULT_PORT}/api/health");
     println!("{url}");
     if !no_open {
         login::try_open(&url);
@@ -668,4 +1088,541 @@ fn cmd_docs(no_open: bool) {
     if !no_open {
         login::try_open(url);
     }
+}
+
+fn looks_like_catalog_id(path: &[String]) -> bool {
+    let Some(first) = path.first() else {
+        return false;
+    };
+    !first.starts_with("tools.") && !first.starts_with("executor.") && first.contains('.')
+}
+
+fn catalog_query_from_path(
+    path: &[String],
+) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error + Send + Sync>> {
+    let last = path.last().cloned().unwrap_or_default();
+    let json_text = if let Some(file) = last.strip_prefix('@') {
+        std::fs::read_to_string(file)?
+    } else {
+        last
+    };
+    let trimmed = json_text.trim();
+    if !trimmed.starts_with('{') {
+        return Ok(BTreeMap::new());
+    }
+    let value: Value = serde_json::from_str(trimmed)?;
+    let mut query = BTreeMap::new();
+    if let Some(obj) = value.as_object() {
+        for (key, val) in obj {
+            match val {
+                Value::String(s) => {
+                    query.insert(key.clone(), s.clone());
+                }
+                Value::Null => {}
+                other => {
+                    query.insert(key.clone(), other.to_string());
+                }
+            }
+        }
+    }
+    Ok(query)
+}
+
+fn parse_values(
+    pairs: &[String],
+) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut values = BTreeMap::new();
+    for pair in pairs {
+        let Some((key, value)) = pair.split_once('=') else {
+            return Err(format!("--value deve ser KEY=VALUE, recebido {pair}").into());
+        };
+        values.insert(key.to_owned(), value.to_owned());
+    }
+    Ok(values)
+}
+
+async fn cmd_web(
+    dir: Option<&Path>,
+    no_open: bool,
+    origin: Option<String>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let daemon_origin = daemon::ensure_daemon(dir).await?;
+    let url = origin
+        .or_else(|| {
+            std::env::var("EXECUTOR_CONSOLE_ORIGIN")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or(daemon_origin);
+    println!("{url}");
+    if !no_open {
+        login::try_open(&url);
+    }
+    Ok(())
+}
+
+async fn cmd_catalog(
+    dir: Option<&Path>,
+    cmd: Option<CatalogCmd>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    match cmd {
+        None => {
+            let body = daemon::get_json(&origin, "/api/catalog", token.as_deref()).await?;
+            let mut providers: Vec<String> = body
+                .get("providers")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|p| {
+                    p.get("slug")
+                        .and_then(Value::as_str)
+                        .or_else(|| p.as_str())
+                        .map(str::to_owned)
+                })
+                .collect();
+            if providers.is_empty() {
+                providers = body
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|h| h.pointer("/endpoint/provider")?.as_str().map(str::to_owned))
+                    .collect();
+                providers.sort();
+                providers.dedup();
+            }
+            if providers.is_empty() {
+                println!("(nenhum provedor no catálogo)");
+            } else {
+                for p in providers {
+                    println!("{p}");
+                }
+            }
+        }
+        Some(CatalogCmd::Search { job }) => {
+            let q = urlencoding_query(&job.join(" "));
+            let body =
+                daemon::get_json(&origin, &format!("/api/catalog?q={q}"), token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        Some(CatalogCmd::Get { id }) => {
+            let encoded = urlencoding_query(&id);
+            let body = daemon::get_json(
+                &origin,
+                &format!("/api/catalog/{encoded}"),
+                token.as_deref(),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_connections(
+    dir: Option<&Path>,
+    cmd: ConnectionsCmd,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    match cmd {
+        ConnectionsCmd::List => {
+            let body = daemon::get_json(&origin, "/api/connections", token.as_deref()).await?;
+            let rows = body
+                .get("connections")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if rows.is_empty() {
+                println!("(nenhuma conexão)");
+            } else {
+                for c in rows {
+                    println!(
+                        "{}/{}/{}\t{}",
+                        c.get("owner").and_then(Value::as_str).unwrap_or(""),
+                        c.get("integration").and_then(Value::as_str).unwrap_or(""),
+                        c.get("name").and_then(Value::as_str).unwrap_or(""),
+                        c.get("template").and_then(Value::as_str).unwrap_or("")
+                    );
+                }
+            }
+        }
+        ConnectionsCmd::Add {
+            integration,
+            name,
+            owner,
+            template,
+            identity_label,
+            values,
+        } => {
+            let mut body = json!({
+                "integration": integration,
+                "name": name,
+                "template": template,
+                "values": parse_values(&values)?,
+            });
+            if let Some(owner) = owner {
+                body["owner"] = json!(owner);
+            }
+            if let Some(label) = identity_label {
+                body["identity_label"] = json!(label);
+            }
+            let created =
+                daemon::post_json(&origin, "/api/connections", &body, token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&created)?);
+        }
+        ConnectionsCmd::Remove {
+            owner,
+            integration,
+            name,
+        } => {
+            let path = format!("/api/connections/{owner}/{integration}/{name}");
+            daemon::delete_json(&origin, &path, token.as_deref()).await?;
+            println!("removed {owner}/{integration}/{name}");
+        }
+        ConnectionsCmd::Refresh {
+            owner,
+            integration,
+            name,
+        } => {
+            let path = format!("/api/connections/{owner}/{integration}/{name}/refresh");
+            let body = daemon::post_json(&origin, &path, &json!({}), token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_balance(dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    let body = daemon::get_json(&origin, "/api/balance", token.as_deref()).await?;
+    println!("{}", serde_json::to_string_pretty(&body)?);
+    Ok(())
+}
+
+async fn cmd_topup(
+    dir: Option<&Path>,
+    micro: Option<i64>,
+    confirm: Option<String>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    let body = if let Some(id) = confirm {
+        daemon::post_json(
+            &origin,
+            &format!("/api/balance/topup/{id}/confirm"),
+            &json!({}),
+            token.as_deref(),
+        )
+        .await?
+    } else {
+        daemon::post_json(
+            &origin,
+            "/api/balance/topup",
+            &json!({ "micro": micro.unwrap_or(5_000_000) }),
+            token.as_deref(),
+        )
+        .await?
+    };
+    println!("{}", serde_json::to_string_pretty(&body)?);
+    Ok(())
+}
+
+async fn cmd_org(
+    dir: Option<&Path>,
+    cmd: OrgCmd,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    match cmd {
+        OrgCmd::Ls => {
+            let body = daemon::get_json(&origin, "/api/orgs", token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        OrgCmd::Create { name } => {
+            let body = daemon::post_json(
+                &origin,
+                "/api/orgs",
+                &json!({ "name": name }),
+                token.as_deref(),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        OrgCmd::Invite { email, org, role } => {
+            let body = daemon::post_json(
+                &origin,
+                &format!("/api/orgs/{org}/invites"),
+                &json!({ "email": email, "role": role }),
+                token.as_deref(),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        OrgCmd::Join { code } => {
+            let body = daemon::post_json(
+                &origin,
+                "/api/orgs/join",
+                &json!({ "code": code }),
+                token.as_deref(),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        OrgCmd::Members { org } => {
+            let body = daemon::get_json(
+                &origin,
+                &format!("/api/orgs/{org}/members"),
+                token.as_deref(),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_skills(
+    dir: Option<&Path>,
+    cmd: SkillsCmd,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    match cmd {
+        SkillsCmd::Ls => {
+            let body = daemon::get_json(&origin, "/api/skills", token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        SkillsCmd::Add { slug, file, name } => {
+            let body_md = std::fs::read_to_string(&file)?;
+            let created = daemon::post_json(
+                &origin,
+                "/api/skills",
+                &json!({ "slug": slug, "name": name, "body": body_md }),
+                token.as_deref(),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&created)?);
+        }
+        SkillsCmd::Install { slug } => {
+            let body = daemon::get_json(
+                &origin,
+                &format!("/api/skills/{slug}/install"),
+                token.as_deref(),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_run(
+    dir: Option<&Path>,
+    binary: String,
+    args: Vec<String>,
+    integration: Option<String>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    let mut body = json!({ "binary": binary, "args": args });
+    if let Some(integration) = integration {
+        body["integration"] = json!(integration);
+    }
+    let out = daemon::post_json(&origin, "/api/cli/run", &body, token.as_deref()).await?;
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+async fn cmd_arena(
+    dir: Option<&Path>,
+    cmd: ArenaCmd,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    match cmd {
+        ArenaCmd::Ls => {
+            let body =
+                daemon::get_json(&origin, "/api/arena/capabilities", token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        ArenaCmd::Run { capability, query } => {
+            let query = parse_values(&query)?;
+            let body = daemon::post_json(
+                &origin,
+                "/api/arena/run",
+                &json!({ "capability": capability, "query": query }),
+                token.as_deref(),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+    }
+    Ok(())
+}
+
+fn known_env_provider(key: &str) -> Option<(&'static str, &'static str)> {
+    match key {
+        "STRIPE_KEY" | "STRIPE_API_KEY" | "STRIPE_SECRET_KEY" => Some(("stripe", "token")),
+        "GITHUB_TOKEN" | "GH_TOKEN" => Some(("github", "token")),
+        "OPENAI_API_KEY" => Some(("openai", "token")),
+        "HUNTER_API_KEY" => Some(("hunter", "token")),
+        "VERCEL_TOKEN" => Some(("vercel", "token")),
+        _ => None,
+    }
+}
+
+fn parse_env_file(
+    path: &Path,
+) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut values = BTreeMap::new();
+    for line in std::fs::read_to_string(path)?.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        values.insert(
+            key.trim().to_owned(),
+            value.trim().trim_matches('"').to_owned(),
+        );
+    }
+    Ok(values)
+}
+
+fn collect_skills(
+    dir: &Path,
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut out = Vec::new();
+    if dir.join("SKILL.md").is_file() {
+        let slug = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("skill")
+            .to_owned();
+        out.push((slug, std::fs::read_to_string(dir.join("SKILL.md"))?));
+        return Ok(out);
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let skill = entry.path().join("SKILL.md");
+        if skill.is_file() {
+            let slug = entry.file_name().to_string_lossy().into_owned();
+            out.push((slug, std::fs::read_to_string(skill)?));
+        }
+    }
+    Ok(out)
+}
+
+fn cmd_scan(
+    dir: Option<&Path>,
+    env_file: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut preview = json!({ "skills": [], "env": [] });
+    if let Some(dir) = dir {
+        preview["skills"] = json!(
+            collect_skills(dir)?
+                .into_iter()
+                .map(|(slug, _)| slug)
+                .collect::<Vec<_>>()
+        );
+    }
+    if let Some(env_file) = env_file {
+        let keys: Vec<String> = parse_env_file(env_file)?
+            .into_keys()
+            .filter(|k| known_env_provider(k).is_some())
+            .collect();
+        preview["env"] = json!(keys);
+    }
+    println!("{}", serde_json::to_string_pretty(&preview)?);
+    Ok(())
+}
+
+async fn cmd_upload(
+    dir: Option<&Path>,
+    cmd: UploadCmd,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    match cmd {
+        UploadCmd::Skills { dir: skill_dir } => {
+            for (slug, body) in collect_skills(&skill_dir)? {
+                let created = daemon::post_json(
+                    &origin,
+                    "/api/skills",
+                    &json!({ "slug": slug, "body": body }),
+                    token.as_deref(),
+                )
+                .await?;
+                println!("{}", serde_json::to_string_pretty(&created)?);
+            }
+        }
+        UploadCmd::Env { file, select } => {
+            let selected = select
+                .map(|s| {
+                    s.split(',')
+                        .map(|p| p.trim().to_ascii_lowercase())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            for (key, value) in parse_env_file(&file)? {
+                let Some((provider, field)) = known_env_provider(&key) else {
+                    continue;
+                };
+                if !selected.is_empty() && !selected.iter().any(|s| s == provider) {
+                    continue;
+                }
+                let created = daemon::post_json(
+                    &origin,
+                    "/api/connections",
+                    &json!({
+                        "integration": provider,
+                        "name": "upload",
+                        "template": "bearer",
+                        "values": { field: value },
+                    }),
+                    token.as_deref(),
+                )
+                .await?;
+                println!("{}", serde_json::to_string_pretty(&created)?);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_team_tool(
+    dir: Option<&Path>,
+    cmd: TeamToolCmd,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let origin = daemon::ensure_daemon(dir).await?;
+    let token = daemon::bearer_token(dir);
+    match cmd {
+        TeamToolCmd::List => {
+            let body = daemon::get_json(&origin, "/api/team-tools", token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        TeamToolCmd::Add {
+            name,
+            provider,
+            base_url,
+            secret,
+        } => {
+            let body = json!({
+                "name": name,
+                "provider": provider,
+                "base_url": base_url,
+                "secret": secret,
+            });
+            let created =
+                daemon::post_json(&origin, "/api/team-tools", &body, token.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&created)?);
+        }
+    }
+    Ok(())
 }

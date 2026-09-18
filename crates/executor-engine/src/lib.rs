@@ -7,6 +7,7 @@
 #![allow(clippy::result_large_err)] // ExecutorError is the domain error; boxing hides fields.
 #![allow(clippy::module_name_repetitions)] // `Executor` vocabulary (`ExecuteOptions` lives in core).
 
+mod agent_catalog;
 mod catalog;
 mod code;
 mod ema;
@@ -22,7 +23,8 @@ use std::sync::atomic::AtomicU64;
 use executor_core::{
     CatalogStore, Connection, ConnectionInput, ConnectionRef, ExecuteOptions, ExecutionId,
     ExecutorError, Integration, IntegrationPlugin, IntegrationSlug, Limits, MemoryCatalog, Metrics,
-    NoopMetrics, Outcome, PluginId, RegisterIntegration, ResumeAction, Tool, ToolListFilter,
+    NoopMetrics, Outcome, PluginId, RegisterIntegration, ResumeAction, ResumeRequest, Tool,
+    ToolListFilter,
 };
 use executor_secrets::{MemorySecrets, SecretResolver};
 use parking_lot::RwLock;
@@ -218,6 +220,22 @@ impl Executor {
         self.inner.refresh_connection(id).await
     }
 
+    /// Update connection metadata and optional secret values (write-only).
+    ///
+    /// # Errors
+    ///
+    /// Missing connection or secret store.
+    pub fn patch_connection(
+        &self,
+        id: &ConnectionRef,
+        identity_label: Option<String>,
+        description: Option<String>,
+        values: std::collections::BTreeMap<String, String>,
+    ) -> Result<Connection, ExecutorError> {
+        self.inner
+            .patch_connection(id, identity_label, description, values)
+    }
+
     /// Invoke a static or catalog tool. Bounded, timed, cancellable.
     ///
     /// # Errors
@@ -266,8 +284,29 @@ impl Executor {
         id: &ExecutionId,
         action: ResumeAction,
     ) -> Result<Outcome, ExecutorError> {
+        self.resume_request(
+            id,
+            ResumeRequest {
+                action,
+                content: None,
+                persist: None,
+            },
+        )
+        .await
+    }
+
+    /// Resume with form content and persist-choice.
+    ///
+    /// # Errors
+    ///
+    /// Missing/consumed execution, not paused, invoke failures.
+    pub async fn resume_request(
+        &self,
+        id: &ExecutionId,
+        request: ResumeRequest,
+    ) -> Result<Outcome, ExecutorError> {
         self.inner
-            .resume(id, action, self.inner.cancel.child_token())
+            .resume(id, request, self.inner.cancel.child_token())
             .await
     }
 
@@ -332,6 +371,35 @@ impl Executor {
         Ok(self.inner.store.remove_connection(id)?)
     }
 
+    /// Fetch one connection.
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn get_connection(&self, id: &ConnectionRef) -> Result<Option<Connection>, ExecutorError> {
+        Ok(self.inner.store.get_connection(id)?)
+    }
+
+    /// Resolve the inject token for a connection (trusted space only).
+    ///
+    /// # Errors
+    ///
+    /// Storage or secret backend.
+    pub fn connection_inject_secret(
+        &self,
+        id: &ConnectionRef,
+    ) -> Result<Option<String>, ExecutorError> {
+        let Some(conn) = self.inner.store.get_connection(id)? else {
+            return Ok(None);
+        };
+        let values = self.inner.resolve_secrets(&conn)?;
+        Ok(values
+            .get("token")
+            .or_else(|| values.get("api_key"))
+            .or_else(|| values.values().next())
+            .cloned())
+    }
+
     /// Resolve a CLI path for inspect/describe.
     ///
     /// # Errors
@@ -347,6 +415,124 @@ impl Executor {
         let mut ids: Vec<String> = self.inner.plugins.keys().cloned().collect();
         ids.sort();
         ids
+    }
+
+    /// Run each plugin's `detect` against `url`.
+    #[must_use]
+    pub fn detect(&self, url: &str) -> Vec<executor_core::Detection> {
+        let mut hits: Vec<executor_core::Detection> = self
+            .inner
+            .plugins
+            .values()
+            .filter_map(|p| p.detect(url))
+            .collect();
+        hits.sort_by(|a, b| a.kind.as_str().cmp(b.kind.as_str()));
+        hits
+    }
+
+    /// Policies in the catalog.
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn list_policies(&self) -> Result<Vec<executor_core::ToolPolicy>, ExecutorError> {
+        Ok(self.inner.store.list_policies()?)
+    }
+
+    /// One integration row (config included).
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn get_integration_record(
+        &self,
+        slug: &IntegrationSlug,
+    ) -> Result<Option<executor_core::IntegrationRecord>, ExecutorError> {
+        Ok(self.inner.store.get_integration(slug)?)
+    }
+
+    /// Replace an integration row (config-plane updates).
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn put_integration_record(
+        &self,
+        row: executor_core::IntegrationRecord,
+    ) -> Result<(), ExecutorError> {
+        Ok(self.inner.store.put_integration(row)?)
+    }
+
+    /// Load a persisted execution (paused or completed).
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn get_execution(
+        &self,
+        id: &ExecutionId,
+    ) -> Result<Option<executor_core::ExecutionState>, ExecutorError> {
+        Ok(self.inner.store.get_execution(id)?)
+    }
+
+    /// Load a toolkit by slug.
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn toolkit_by_slug(
+        &self,
+        slug: &str,
+    ) -> Result<Option<executor_core::Toolkit>, ExecutorError> {
+        let Some(body) = self.inner.store.get_kv(executor_core::KV_TOOLKITS, slug)? else {
+            return Ok(None);
+        };
+        Ok(serde_json::from_value(body).ok())
+    }
+
+    /// KV put (toolkits / oauth clients).
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn put_kv(
+        &self,
+        collection: &str,
+        id: &str,
+        body: serde_json::Value,
+    ) -> Result<(), ExecutorError> {
+        Ok(self.inner.store.put_kv(collection, id, body)?)
+    }
+
+    /// KV get.
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn get_kv(
+        &self,
+        collection: &str,
+        id: &str,
+    ) -> Result<Option<serde_json::Value>, ExecutorError> {
+        Ok(self.inner.store.get_kv(collection, id)?)
+    }
+
+    /// KV list.
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn list_kv(&self, collection: &str) -> Result<Vec<serde_json::Value>, ExecutorError> {
+        Ok(self.inner.store.list_kv(collection)?)
+    }
+
+    /// KV delete.
+    ///
+    /// # Errors
+    ///
+    /// Storage.
+    pub fn delete_kv(&self, collection: &str, id: &str) -> Result<bool, ExecutorError> {
+        Ok(self.inner.store.delete_kv(collection, id)?)
     }
 }
 

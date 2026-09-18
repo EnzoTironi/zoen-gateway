@@ -33,13 +33,13 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// Production defaults: bounded in-flight, 30s execute, 15s HTTP, 64 MiB specs.
+    /// Production defaults: bounded in-flight, 5 min execute (`QuickJS` default), 15s HTTP, 64 MiB specs.
     #[must_use]
     pub const fn production() -> Self {
         Self {
             max_in_flight: 256,
             acquire_timeout: Duration::from_millis(0),
-            execute_timeout: Duration::from_secs(30),
+            execute_timeout: Duration::from_secs(300),
             http_timeout: Duration::from_secs(15),
             max_spec_bytes: 64 * 1024 * 1024,
             max_tools_per_connection: 10_000,
@@ -48,7 +48,7 @@ impl Limits {
             max_search_results: 50,
             approval_ttl: Duration::from_mins(15),
             max_code_bytes: 64 * 1024,
-            max_tool_calls: 32,
+            max_tool_calls: 256,
         }
     }
 

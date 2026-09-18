@@ -1,0 +1,157 @@
+{
+  "endpoints": [
+    {
+      "id": "demo.echo",
+      "capability": "demo.echo",
+      "provider": "demo",
+      "name": "Eco de demonstração",
+      "summary": "Devolve os argumentos. Rota pública, sem chave e sem custo.",
+      "jobs": ["echo", "ping", "hello", "teste", "demonstração"],
+      "method": "GET",
+      "path": "/echo",
+      "base_url": "mock://demo",
+      "access": "anonymous",
+      "cost_micro": 0,
+      "query": {
+        "text": { "type": "string", "required": false, "example": "olá" }
+      }
+    },
+    {
+      "id": "demo.strict",
+      "capability": "demo.strict",
+      "provider": "demo",
+      "name": "Eco com query estrita",
+      "summary": "Rejeita parâmetros não declarados (contrato Treg strict_query).",
+      "jobs": ["strict query", "query estrita", "parâmetro inválido"],
+      "method": "GET",
+      "path": "/strict",
+      "base_url": "mock://demo",
+      "access": "anonymous",
+      "cost_micro": 0,
+      "strict_query": true,
+      "query": {
+        "text": { "type": "string", "required": true, "example": "olá" }
+      }
+    },
+    {
+      "id": "hunter.people.email.find",
+      "capability": "people.email.find",
+      "provider": "hunter",
+      "name": "Encontrar e-mail profissional",
+      "summary": "Encontra o e-mail de trabalho a partir do nome e do domínio da empresa.",
+      "jobs": [
+        "find a work email",
+        "encontrar e-mail",
+        "email profissional",
+        "people email find",
+        "hunter"
+      ],
+      "method": "GET",
+      "path": "/email-finder",
+      "base_url": "mock://hunter",
+      "access": "platform",
+      "cost_micro": 10000,
+      "query": {
+        "domain": { "type": "string", "required": true, "example": "stripe.com" },
+        "full_name": { "type": "string", "required": true, "example": "Patrick Collison" }
+      }
+    },
+    {
+      "id": "hunter.people.email.verify",
+      "capability": "people.email.verify",
+      "provider": "hunter",
+      "name": "Verificar e-mail",
+      "summary": "Verifica se um e-mail existe e é entregável.",
+      "jobs": ["verify email", "verificar e-mail", "validar e-mail"],
+      "method": "GET",
+      "path": "/email-verifier",
+      "base_url": "mock://hunter",
+      "access": "platform",
+      "cost_micro": 5000,
+      "query": {
+        "email": { "type": "string", "required": true, "example": "hello@example.com" }
+      }
+    },
+    {
+      "id": "apollo.people.email.find",
+      "capability": "people.email.find",
+      "provider": "apollo",
+      "name": "Encontrar e-mail (Apollo)",
+      "summary": "Mesma capacidade que Hunter, para o Enrich Arena comparar custo e resposta.",
+      "jobs": ["encontrar e-mail", "find work email", "apollo", "enrich"],
+      "method": "GET",
+      "path": "/people/email",
+      "base_url": "mock://apollo",
+      "access": "platform",
+      "cost_micro": 8000,
+      "query": {
+        "domain": { "type": "string", "required": true, "example": "stripe.com" },
+        "full_name": { "type": "string", "required": true, "example": "Patrick Collison" }
+      }
+    },
+    {
+      "id": "treg.people.email.find",
+      "capability": "people.email.find",
+      "provider": "treg",
+      "name": "Encontrar e-mail (roteado)",
+      "summary": "treg escolhe o provedor. A resposta nomeia o filho que atendeu.",
+      "jobs": ["encontrar e-mail", "find work email", "roteado", "capability"],
+      "method": "POST",
+      "path": "/route/people.email.find",
+      "base_url": "mock://treg",
+      "access": "platform",
+      "cost_micro": 10000,
+      "routed_child": "hunter.people.email.find",
+      "query": {
+        "domain": { "type": "string", "required": true },
+        "full_name": { "type": "string", "required": true }
+      }
+    },
+    {
+      "id": "github.user.get",
+      "capability": "github.user.get",
+      "provider": "github",
+      "name": "Usuário GitHub autenticado",
+      "summary": "GET /user. Usa emulate se GITHUB_EMULATOR_URL existir; senão mock.",
+      "jobs": ["github user", "usuário github", "whoami github", "get authenticated"],
+      "method": "GET",
+      "path": "/user",
+      "base_url": "$GITHUB_EMULATOR_URL",
+      "access": "anonymous",
+      "cost_micro": 0,
+      "query": {}
+    },
+    {
+      "id": "moz.backlinks.lookup",
+      "capability": "seo.backlinks",
+      "provider": "moz",
+      "name": "Backlinks de um domínio",
+      "summary": "Lista backlinks. Preço por chamada na chave da plataforma.",
+      "jobs": ["backlinks", "seo", "autoridade", "links para um domínio"],
+      "method": "GET",
+      "path": "/backlinks",
+      "base_url": "mock://moz",
+      "access": "platform",
+      "cost_micro": 50000,
+      "query": {
+        "domain": { "type": "string", "required": true, "example": "example.com" }
+      }
+    },
+    {
+      "id": "internal.private.crm",
+      "capability": "crm.read",
+      "provider": "internal",
+      "name": "CRM interno",
+      "summary": "Sem preço publicado. Recusa a chave da plataforma — conecte a sua.",
+      "jobs": ["crm", "contatos internos", "private crm"],
+      "method": "GET",
+      "path": "/contacts",
+      "base_url": "mock://internal",
+      "access": "own_key_only",
+      "cost_micro": null,
+      "query": {
+        "q": { "type": "string", "required": false }
+      }
+    }
+  ]
+}
